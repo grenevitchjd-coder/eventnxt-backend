@@ -14,12 +14,13 @@ bearer_scheme = HTTPBearer(auto_error=False)
 class CurrentUser:
     """Plain identity object built from Events360's /oauth/userinfo response."""
 
-    def __init__(self, data: dict):
+    def __init__(self, data: dict, raw_token: str):
         self.user_id = data["user_id"]
         self.organization_id = data["organization_id"]
         self.name = data["name"]
         self.email = data["email"]
         self.role = data["role"]
+        self.raw_token = raw_token  # forwarded to other Events360 endpoints, e.g. /oauth/events/{id}
 
 
 def get_current_user(
@@ -33,4 +34,4 @@ def get_current_user(
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired session.")
     except httpx.HTTPError:
         raise HTTPException(status_code=503, detail="Could not reach Events360 to verify your session.")
-    return CurrentUser(data)
+    return CurrentUser(data, credentials.credentials)
