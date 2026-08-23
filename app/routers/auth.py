@@ -1,5 +1,6 @@
 import secrets
 
+import httpx
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import RedirectResponse
 
@@ -42,7 +43,20 @@ def callback(request: Request, code: str, state: str):
     if not cookie_state or cookie_state != state:
         raise HTTPException(status_code=400, detail="Invalid or missing OAuth state — please try again.")
 
-    access_token = exchange_code_for_token(code)
+    try:
+        access_token = exchange_code_for_token(code)
+    except httpx.HTTPStatusError as e:
+        # Events360 rejected the exchange — surface its actual reason instead
+        # of crashing into a generic 500.
+        try:
+            detail = e.response.json().get("detail", e.response.text)
+        except Exception:
+            detail = e.response.text
+        raise HTTPException(
+            status_code=502, detail=f"Events360 rejected the token exchange: {detail}"
+        )
+    except httpx.HTTPError as e:
+        raise HTTPException(status_code=503, detail=f"Could not reach Events360: {e}")
 
     frontend_complete_url = f"{settings.eventnxt_frontend_url}/auth/complete?token={access_token}"
     response = RedirectResponse(url=frontend_complete_url, status_code=302)
