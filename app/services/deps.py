@@ -1,12 +1,14 @@
 import httpx
 from fastapi import Depends, HTTPException, status
-from fastapi.security import OAuth2PasswordBearer
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 
 from app.services.events360_client import fetch_userinfo
 
-# tokenUrl is informational only here (shown in /docs) — EventNXT never
-# issues tokens itself, it only validates ones Events360 issued.
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/login", auto_error=False)
+# HTTPBearer (not OAuth2PasswordBearer) deliberately — EventNXT has no
+# password login of its own, it only validates tokens Events360 already
+# issued. This gives /docs a simple "paste your token" box instead of a
+# username/password form that doesn't apply here.
+bearer_scheme = HTTPBearer(auto_error=False)
 
 
 class CurrentUser:
@@ -20,11 +22,13 @@ class CurrentUser:
         self.role = data["role"]
 
 
-def get_current_user(token: str = Depends(oauth2_scheme)) -> CurrentUser:
-    if not token:
+def get_current_user(
+    credentials: HTTPAuthorizationCredentials = Depends(bearer_scheme),
+) -> CurrentUser:
+    if not credentials:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Not authenticated.")
     try:
-        data = fetch_userinfo(token)
+        data = fetch_userinfo(credentials.credentials)
     except httpx.HTTPStatusError:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired session.")
     except httpx.HTTPError:
