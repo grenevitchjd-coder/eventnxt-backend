@@ -29,7 +29,17 @@ class EventProfile(Base):
     description = Column(Text, nullable=True)
     address = Column(String, nullable=True)
     banner_photo_url = Column(String, nullable=True)
+    logo_url = Column(String, nullable=True)
     external_ticket_url = Column(String, nullable=True)
+
+    # Events360 owns the real start/end dates. Cached here (refreshed
+    # whenever the organizer loads or saves this profile, which already
+    # calls Events360) so the PUBLIC page — which has no login and can't
+    # call Events360's authenticated event lookup — can still show them.
+    # Tradeoff: if dates change in Events360 and this profile is never
+    # reopened afterward, the public page could show stale dates until it is.
+    cached_start_date = Column(DateTime(timezone=True), nullable=True)
+    cached_end_date = Column(DateTime(timezone=True), nullable=True)
 
     slug = Column(String, unique=True, nullable=False, index=True)
     is_published = Column(Boolean, nullable=False, default=False)

@@ -22,4 +22,8 @@ def require_event_access(event_id: str, user: CurrentUser = Depends(get_current_
     if response.status_code == 404:
         raise HTTPException(status_code=404, detail="Event not found, or you don't have access to it.")
     response.raise_for_status()
+    # Attached, not returned separately, so existing callers that only use
+    # `user` as a CurrentUser keep working unchanged — callers that need
+    # the event's real dates (for caching onto the profile) can read this.
+    user.event_data = response.json()
     return user
