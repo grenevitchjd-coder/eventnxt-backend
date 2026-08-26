@@ -22,10 +22,15 @@ def create_guest(
     user: CurrentUser = Depends(require_event_access),
 ):
     guest_type = db.query(GuestType).filter(GuestType.id == payload.guest_type_id).first()
-    if not guest_type or str(guest_type.organization_id) != user.organization_id:
-        raise HTTPException(status_code=404, detail="Guest type not found.")
+    if not guest_type or str(guest_type.event_id) != event_id:
+        raise HTTPException(status_code=404, detail="Guest type not found for this event.")
 
-    if payload.seating_category_id:
+    # If the organizer didn't explicitly set a seating category, pre-fill
+    # from the guest type's default (still fully overridable — this is
+    # just what happens when nothing is manually specified).
+    effective_seating_category_id = payload.seating_category_id or guest_type.default_seating_category_id
+
+    if effective_seating_category_id:
         # Row-level lock: holds the SeatingCategory row for the rest of this
         # transaction, so two simultaneous requests confirming into the same
         # category can't both slip past the capacity check into the last
@@ -33,7 +38,7 @@ def create_guest(
         # then sees the up-to-date count.
         category = (
             db.query(SeatingCategory)
-            .filter(SeatingCategory.id == payload.seating_category_id, SeatingCategory.event_id == event_id)
+            .filter(SeatingCategory.id == effective_seating_category_id, SeatingCategory.event_id == event_id)
             .with_for_update()
             .first()
         )
@@ -60,7 +65,7 @@ def create_guest(
         name=payload.name,
         email=payload.email,
         guest_type_id=payload.guest_type_id,
-        seating_category_id=payload.seating_category_id,
+        seating_category_id=effective_seating_category_id,
         allocation_status=GuestAllocationStatus(payload.allocation_status),
         rsvp_token=secrets.token_urlsafe(24),
     )
