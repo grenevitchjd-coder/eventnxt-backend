@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from dateutil import parser as date_parser
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
@@ -17,6 +17,7 @@ from app.schemas.event_profile import (
     EventProfileScheduleItemCreateRequest,
     EventProfileScheduleItemResponse,
     PublicScheduleItemResponse,
+    PublicDailyScheduleItemResponse,
     EventProfilePhotoResponse,
     PublicEventProfileResponse,
 )
@@ -39,30 +40,42 @@ def _parse_cached_date(raw: str | None):
     return date_parser.isoparse(raw) if raw else None
 
 
-def _expand_schedule_for_public(items, cached_start, cached_end) -> list[PublicScheduleItemResponse]:
+def _refresh_cached_dates(profile: EventProfile, user: CurrentUser) -> None:
     """
-    One-time items pass through as-is. Daily-recurring items get expanded
-    into one concrete instance per day of the event's real date range —
-    the public page just wants a flat, already-resolved timeline, it
-    never needs to know a given entry came from a repeating pattern.
+    Pulls fresh dates from Events360 onto the profile — require_event_access
+    already fetched them for this request (user.event_data), so this is
+    just writing them down. Called at the moments staleness actually
+    matters (adding a schedule item, publishing), not just the main Save
+    button, so a profile that predates the event having confirmed dates
+    self-heals the next time anything meaningful happens to it.
     """
-    expanded = []
+    profile.cached_start_date = _parse_cached_date(user.event_data.get("start_date"))
+    profile.cached_end_date = _parse_cached_date(user.event_data.get("end_date"))
+
+
+def _split_schedule_for_public(items):
+    """
+    Daily items are shown ONCE, not expanded per day of the event — just
+    the label and a plain wall-clock time, with zero Date/timezone
+    conversion anywhere. One-time items pass through with their own
+    specific date, unchanged.
+    """
+    daily = []
+    special = []
     for item in items:
-        if not item.is_recurring:
+        if item.is_recurring:
+            if item.time_of_day:
+                daily.append(
+                    PublicDailyScheduleItemResponse(
+                        label=item.label, time_of_day=item.time_of_day.strftime("%H:%M")
+                    )
+                )
+        else:
             if item.event_datetime:
-                expanded.append(PublicScheduleItemResponse(label=item.label, event_datetime=item.event_datetime))
-            continue
-        if not cached_start:
-            continue  # no date range to expand a daily item across
-        start_day = cached_start.date()
-        end_day = (cached_end or cached_start).date()
-        current = start_day
-        while current <= end_day:
-            combined = datetime.combine(current, item.time_of_day, tzinfo=timezone.utc)
-            expanded.append(PublicScheduleItemResponse(label=item.label, event_datetime=combined))
-            current += timedelta(days=1)
-    expanded.sort(key=lambda x: x.event_datetime)
-    return expanded
+                special.append(PublicScheduleItemResponse(label=item.label, event_datetime=item.event_datetime))
+    daily.sort(key=lambda x: x.time_of_day)
+    special.sort(key=lambda x: x.event_datetime)
+    return daily, special
 
 
 # ---------- Profile itself ----------
@@ -156,6 +169,7 @@ def publish_profile(
     event_id: str, db: Session = Depends(get_db), user: CurrentUser = Depends(require_event_access)
 ):
     profile = _get_or_404(db, event_id)
+    _refresh_cached_dates(profile, user)
     profile.is_published = True
     profile.published_at = datetime.now(timezone.utc)
     db.commit()
@@ -252,6 +266,11 @@ def create_schedule_item(
     user: CurrentUser = Depends(require_event_access),
 ):
     profile = _get_or_404(db, event_id)
+    if payload.is_recurring:
+        # A daily item needs the event's real date range to expand across —
+        # refresh now so it doesn't silently vanish on the public page if
+        # this profile predates the event having confirmed dates.
+        _refresh_cached_dates(profile, user)
     item = EventProfileScheduleItem(
         event_profile_id=profile.id,
         label=payload.label,
@@ -370,7 +389,7 @@ def get_public_event_profile(slug: str, db: Session = Depends(get_db)):
         .filter(EventProfileScheduleItem.event_profile_id == profile.id)
         .all()
     )
-    schedule = _expand_schedule_for_public(schedule_items, profile.cached_start_date, profile.cached_end_date)
+    daily_schedule, schedule = _split_schedule_for_public(schedule_items)
     photos = (
         db.query(EventProfilePhoto)
         .filter(EventProfilePhoto.event_profile_id == profile.id)
@@ -388,6 +407,7 @@ def get_public_event_profile(slug: str, db: Session = Depends(get_db)):
         cached_start_date=profile.cached_start_date,
         cached_end_date=profile.cached_end_date,
         links=links,
+        daily_schedule=daily_schedule,
         schedule=schedule,
         photos=photos,
     )

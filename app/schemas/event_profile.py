@@ -107,15 +107,24 @@ class EventProfileScheduleItemResponse(BaseModel):
 
 
 class PublicScheduleItemResponse(BaseModel):
-    """
-    What the public page actually renders — a flat, already-expanded,
-    chronological list. Daily items have already been turned into one
-    entry per day of the event by the time this is built; the public page
-    never needs to know a given entry came from a recurring pattern.
-    """
+    """A one-time item on the public page — has its own specific date."""
 
     label: str
     event_datetime: datetime
+
+
+class PublicDailyScheduleItemResponse(BaseModel):
+    """
+    A recurring daily pattern shown ONCE, not expanded per day — just a
+    label and a plain wall-clock time ("18:00"), no date attached and no
+    timezone conversion anywhere in the pipeline. This is deliberate: a
+    time like "Doors Open at 6:00 PM" is venue-local wall-clock time, not
+    a moment in UTC — converting it through a timezone and back was
+    exactly the bug that showed 6:00 PM as 11:00 AM to some viewers.
+    """
+
+    label: str
+    time_of_day: str  # "HH:MM", 24-hour, formatted for direct display
 
 
 # ---------- Gallery photos ----------
@@ -146,5 +155,6 @@ class PublicEventProfileResponse(BaseModel):
     cached_start_date: Optional[datetime] = None
     cached_end_date: Optional[datetime] = None
     links: list[EventProfileLinkResponse] = []
+    daily_schedule: list[PublicDailyScheduleItemResponse] = []
     schedule: list[PublicScheduleItemResponse] = []
     photos: list[EventProfilePhotoResponse] = []
