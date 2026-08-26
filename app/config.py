@@ -20,6 +20,16 @@ class Settings(BaseSettings):
     # CORS: comma-separated list of allowed frontend origins.
     cors_allowed_origins: str = "http://localhost:5174,http://localhost:3001"
 
+    # Cloudflare R2 (S3-compatible object storage) — for real file uploads
+    # (event banner photos). Set these via Heroku config vars once an R2
+    # bucket exists; the app works fine without them until upload is
+    # actually attempted.
+    r2_account_id: str = ""
+    r2_access_key_id: str = ""
+    r2_secret_access_key: str = ""
+    r2_bucket_name: str = ""
+    r2_public_url_base: str = ""  # e.g. https://pub-xxxx.r2.dev or a custom domain
+
     class Config:
         env_file = ".env"
 
