@@ -1,5 +1,5 @@
 import uuid
-from datetime import datetime
+from datetime import datetime, time
 from typing import Literal, Optional
 
 from pydantic import BaseModel, model_validator
@@ -67,22 +67,55 @@ class EventProfileLinkResponse(BaseModel):
 
 
 # ---------- Schedule items ----------
+# Two modes: one-time (a specific event_datetime) or daily-recurring (just
+# a time_of_day, applied to every day of the event's real date range).
+# The organizer-facing list/create/delete endpoints work with the raw
+# pattern (one row per item, however it repeats) — expansion into concrete
+# per-day instances happens only for the PUBLIC page (see
+# PublicScheduleItemResponse below), so editing/deleting a daily item acts
+# on the whole pattern, not one expanded occurrence.
 
 
 class EventProfileScheduleItemCreateRequest(BaseModel):
     label: str
-    event_datetime: datetime
+    is_recurring: bool = False
+    event_datetime: Optional[datetime] = None  # required if is_recurring=False
+    time_of_day: Optional[time] = None  # required if is_recurring=True
     sort_order: int = 0
+
+    @model_validator(mode="after")
+    def check_fields_match_recurrence(self):
+        if self.is_recurring:
+            if self.time_of_day is None:
+                raise ValueError("A daily schedule item needs a time of day.")
+        else:
+            if self.event_datetime is None:
+                raise ValueError("A one-time schedule item needs a specific date and time.")
+        return self
 
 
 class EventProfileScheduleItemResponse(BaseModel):
     id: uuid.UUID
     label: str
-    event_datetime: datetime
+    is_recurring: bool
+    event_datetime: Optional[datetime] = None
+    time_of_day: Optional[time] = None
     sort_order: int
 
     class Config:
         from_attributes = True
+
+
+class PublicScheduleItemResponse(BaseModel):
+    """
+    What the public page actually renders — a flat, already-expanded,
+    chronological list. Daily items have already been turned into one
+    entry per day of the event by the time this is built; the public page
+    never needs to know a given entry came from a recurring pattern.
+    """
+
+    label: str
+    event_datetime: datetime
 
 
 # ---------- Gallery photos ----------
@@ -113,5 +146,5 @@ class PublicEventProfileResponse(BaseModel):
     cached_start_date: Optional[datetime] = None
     cached_end_date: Optional[datetime] = None
     links: list[EventProfileLinkResponse] = []
-    schedule: list[EventProfileScheduleItemResponse] = []
+    schedule: list[PublicScheduleItemResponse] = []
     photos: list[EventProfilePhotoResponse] = []

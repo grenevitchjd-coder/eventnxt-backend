@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from dateutil import parser as date_parser
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
@@ -16,6 +16,7 @@ from app.schemas.event_profile import (
     EventProfileLinkResponse,
     EventProfileScheduleItemCreateRequest,
     EventProfileScheduleItemResponse,
+    PublicScheduleItemResponse,
     EventProfilePhotoResponse,
     PublicEventProfileResponse,
 )
@@ -36,6 +37,32 @@ def _get_or_404(db: Session, event_id: str) -> EventProfile:
 
 def _parse_cached_date(raw: str | None):
     return date_parser.isoparse(raw) if raw else None
+
+
+def _expand_schedule_for_public(items, cached_start, cached_end) -> list[PublicScheduleItemResponse]:
+    """
+    One-time items pass through as-is. Daily-recurring items get expanded
+    into one concrete instance per day of the event's real date range —
+    the public page just wants a flat, already-resolved timeline, it
+    never needs to know a given entry came from a repeating pattern.
+    """
+    expanded = []
+    for item in items:
+        if not item.is_recurring:
+            if item.event_datetime:
+                expanded.append(PublicScheduleItemResponse(label=item.label, event_datetime=item.event_datetime))
+            continue
+        if not cached_start:
+            continue  # no date range to expand a daily item across
+        start_day = cached_start.date()
+        end_day = (cached_end or cached_start).date()
+        current = start_day
+        while current <= end_day:
+            combined = datetime.combine(current, item.time_of_day, tzinfo=timezone.utc)
+            expanded.append(PublicScheduleItemResponse(label=item.label, event_datetime=combined))
+            current += timedelta(days=1)
+    expanded.sort(key=lambda x: x.event_datetime)
+    return expanded
 
 
 # ---------- Profile itself ----------
@@ -228,7 +255,9 @@ def create_schedule_item(
     item = EventProfileScheduleItem(
         event_profile_id=profile.id,
         label=payload.label,
+        is_recurring=payload.is_recurring,
         event_datetime=payload.event_datetime,
+        time_of_day=payload.time_of_day,
         sort_order=payload.sort_order,
     )
     db.add(item)
@@ -336,12 +365,12 @@ def get_public_event_profile(slug: str, db: Session = Depends(get_db)):
         .order_by(EventProfileLink.sort_order)
         .all()
     )
-    schedule = (
+    schedule_items = (
         db.query(EventProfileScheduleItem)
         .filter(EventProfileScheduleItem.event_profile_id == profile.id)
-        .order_by(EventProfileScheduleItem.sort_order, EventProfileScheduleItem.event_datetime)
         .all()
     )
+    schedule = _expand_schedule_for_public(schedule_items, profile.cached_start_date, profile.cached_end_date)
     photos = (
         db.query(EventProfilePhoto)
         .filter(EventProfilePhoto.event_profile_id == profile.id)
