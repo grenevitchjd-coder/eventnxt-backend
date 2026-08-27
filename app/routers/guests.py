@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session
 from app.database import get_db
 from app.models.guest import Guest, GuestAllocationStatus
 from app.models.guest_type import GuestType
+from app.models.guest_type_seating_priority import GuestTypeSeatingPriority
 from app.models.seating_category import SeatingCategory
 from app.schemas.guest import GuestCreateRequest, GuestUpdateRequest, GuestResponse
 from app.services.deps import CurrentUser
@@ -47,6 +48,62 @@ def _check_capacity(db: Session, event_id: str, category_id: str, exclude_guest_
         )
 
 
+def _resolve_seating_from_priorities(db: Session, event_id: str, guest_type_id: str):
+    """
+    Walks the guest type's ORDERED seating priority list and returns the
+    first category id with room, or None (either no priorities are
+    configured, or every one is full).
+
+    Deadlock safety: a guest creation may need to lock several categories
+    in one transaction. If we locked them in PRIORITY order, two
+    concurrent creations with overlapping priority lists in different
+    orders could deadlock (transaction A holds category X waiting on Y,
+    transaction B holds Y waiting on X — a circular wait). Instead every
+    transaction locks the same set of candidate categories in a fixed,
+    deterministic order (by id) regardless of priority — since every
+    transaction acquires locks in that identical sequence, a circular
+    wait, and therefore a deadlock, can never form. The actual business
+    decision (which category to pick) is made afterward, using the
+    already-locked data, walking the REAL priority order.
+    """
+    priorities = (
+        db.query(GuestTypeSeatingPriority)
+        .filter(GuestTypeSeatingPriority.guest_type_id == guest_type_id)
+        .order_by(GuestTypeSeatingPriority.priority_order)
+        .all()
+    )
+    if not priorities:
+        return None
+
+    category_ids = [p.seating_category_id for p in priorities]
+
+    locked_categories = (
+        db.query(SeatingCategory)
+        .filter(SeatingCategory.id.in_(category_ids), SeatingCategory.event_id == event_id)
+        .order_by(SeatingCategory.id)  # fixed lock order — NOT priority order
+        .with_for_update()
+        .all()
+    )
+    categories_by_id = {c.id: c for c in locked_categories}
+
+    for p in priorities:  # now walk the REAL priority order to decide
+        category = categories_by_id.get(p.seating_category_id)
+        if not category:
+            continue
+        confirmed_count = (
+            db.query(Guest)
+            .filter(
+                Guest.seating_category_id == category.id,
+                Guest.allocation_status == GuestAllocationStatus.CONFIRMED,
+            )
+            .count()
+        )
+        if confirmed_count < category.capacity:
+            return category.id
+
+    return None
+
+
 @router.post("", response_model=GuestResponse, status_code=201)
 def create_guest(
     event_id: str,
@@ -58,23 +115,49 @@ def create_guest(
     if not guest_type or str(guest_type.event_id) != event_id:
         raise HTTPException(status_code=404, detail="Guest type not found for this event.")
 
-    # If the organizer didn't explicitly set a seating category, pre-fill
-    # from the guest type's default (still fully overridable — this is
-    # just what happens when nothing is manually specified).
-    effective_seating_category_id = payload.seating_category_id or guest_type.default_seating_category_id
+    if payload.seating_category_id:
+        # Explicit override — use it directly, same single-category check
+        # as before, regardless of what the guest type's priority list says.
+        effective_seating_category_id = payload.seating_category_id
+        if payload.allocation_status == "confirmed":
+            _check_capacity(db, event_id, effective_seating_category_id)
+        else:
+            category = (
+                db.query(SeatingCategory)
+                .filter(SeatingCategory.id == effective_seating_category_id, SeatingCategory.event_id == event_id)
+                .first()
+            )
+            if not category:
+                raise HTTPException(status_code=404, detail="Seating category not found for this event.")
 
-    if effective_seating_category_id and payload.allocation_status == "confirmed":
-        _check_capacity(db, event_id, effective_seating_category_id)
-    elif effective_seating_category_id:
-        # Still confirm the category itself is real, just skip the
-        # capacity check for a pending guest.
-        category = (
-            db.query(SeatingCategory)
-            .filter(SeatingCategory.id == effective_seating_category_id, SeatingCategory.event_id == event_id)
+    elif payload.allocation_status == "confirmed":
+        # Nothing explicit — walk the guest type's priority list for the
+        # first available category.
+        effective_seating_category_id = _resolve_seating_from_priorities(db, event_id, payload.guest_type_id)
+        if effective_seating_category_id is None:
+            has_priorities = (
+                db.query(GuestTypeSeatingPriority)
+                .filter(GuestTypeSeatingPriority.guest_type_id == payload.guest_type_id)
+                .count()
+                > 0
+            )
+            if has_priorities:
+                raise HTTPException(
+                    status_code=400,
+                    detail="All preferred seating categories for this guest type are full.",
+                )
+            # else: no priorities configured at all — guest is simply unassigned, that's fine
+
+    else:
+        # Pending guest, nothing explicit — use the top priority as a
+        # placeholder (no capacity check needed while pending).
+        first_priority = (
+            db.query(GuestTypeSeatingPriority)
+            .filter(GuestTypeSeatingPriority.guest_type_id == payload.guest_type_id)
+            .order_by(GuestTypeSeatingPriority.priority_order)
             .first()
         )
-        if not category:
-            raise HTTPException(status_code=404, detail="Seating category not found for this event.")
+        effective_seating_category_id = first_priority.seating_category_id if first_priority else None
 
     guest = Guest(
         event_id=event_id,
@@ -108,6 +191,12 @@ def update_guest(
     db: Session = Depends(get_db),
     user: CurrentUser = Depends(require_event_access),
 ):
+    """
+    Editing always takes an explicit seating_category_id (or null) — no
+    priority-list magic here, unlike creation. Someone editing a specific
+    existing guest is making a deliberate choice, not asking the system
+    to decide for them.
+    """
     guest = db.query(Guest).filter(Guest.id == guest_id, Guest.event_id == event_id).first()
     if not guest:
         raise HTTPException(status_code=404, detail="Guest not found.")
@@ -116,10 +205,6 @@ def update_guest(
     if not guest_type or str(guest_type.event_id) != event_id:
         raise HTTPException(status_code=404, detail="Guest type not found for this event.")
 
-    # Only re-check capacity if this edit actually CHANGES the guest's
-    # effective confirmed seat — editing just their name/email shouldn't
-    # spuriously fail against a category they're already validly in, and
-    # a guest's own existing seat is never counted against themselves.
     already_confirmed_here = (
         guest.allocation_status == GuestAllocationStatus.CONFIRMED
         and str(guest.seating_category_id) == str(payload.seating_category_id)

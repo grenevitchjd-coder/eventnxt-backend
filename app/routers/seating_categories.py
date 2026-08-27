@@ -3,7 +3,7 @@ from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app.models.guest import Guest, GuestAllocationStatus
-from app.models.guest_type import GuestType
+from app.models.guest_type_seating_priority import GuestTypeSeatingPriority
 from app.models.seating_category import SeatingCategory
 from app.schemas.seating_category import (
     SeatingCategoryCreateRequest,
@@ -99,9 +99,9 @@ def delete_seating_category(
     db.query(Guest).filter(Guest.seating_category_id == category_id).update(
         {"seating_category_id": None}
     )
-    db.query(GuestType).filter(GuestType.default_seating_category_id == category_id).update(
-        {"default_seating_category_id": None}
-    )
+    db.query(GuestTypeSeatingPriority).filter(
+        GuestTypeSeatingPriority.seating_category_id == category_id
+    ).delete()
 
     db.delete(category)
     db.commit()
