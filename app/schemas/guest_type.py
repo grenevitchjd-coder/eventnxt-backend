@@ -10,6 +10,11 @@ class GuestTypeCreateRequest(BaseModel):
     default_seating_category_id: Optional[uuid.UUID] = None
 
 
+class GuestTypeUpdateRequest(BaseModel):
+    name: str
+    default_seating_category_id: Optional[uuid.UUID] = None
+
+
 class GuestTypeResponse(BaseModel):
     id: uuid.UUID
     event_id: uuid.UUID

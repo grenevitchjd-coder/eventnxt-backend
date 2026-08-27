@@ -13,6 +13,14 @@ class GuestCreateRequest(BaseModel):
     allocation_status: Literal["confirmed", "pending"] = "confirmed"
 
 
+class GuestUpdateRequest(BaseModel):
+    name: str
+    email: EmailStr
+    guest_type_id: uuid.UUID
+    seating_category_id: Optional[uuid.UUID] = None
+    allocation_status: Literal["confirmed", "pending"] = "confirmed"
+
+
 class GuestResponse(BaseModel):
     id: uuid.UUID
     event_id: uuid.UUID
