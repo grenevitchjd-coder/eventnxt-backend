@@ -41,7 +41,12 @@ def create_guest_type(
     preferences are added separately as an ordered list — see the
     /seating-priorities endpoints below.
     """
-    guest_type = GuestType(event_id=event_id, name=payload.name)
+    guest_type = GuestType(
+        event_id=event_id,
+        name=payload.name,
+        default_ticket_count=payload.default_ticket_count,
+        default_valid_dates=payload.default_valid_dates,
+    )
     db.add(guest_type)
     db.commit()
     db.refresh(guest_type)
@@ -65,6 +70,8 @@ def update_guest_type(
 ):
     guest_type = _get_guest_type_or_404(db, event_id, guest_type_id)
     guest_type.name = payload.name
+    guest_type.default_ticket_count = payload.default_ticket_count
+    guest_type.default_valid_dates = payload.default_valid_dates
     db.commit()
     db.refresh(guest_type)
     return guest_type
