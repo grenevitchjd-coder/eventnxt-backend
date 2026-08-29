@@ -21,18 +21,31 @@ class SalesConfigUpdateRequest(BaseModel):
     platform: Literal["custom_csv", "eventbrite", "ticketmaster", "square", "stripe", "other"]
 
 
+class PointsRateItem(BaseModel):
+    ticket_type: str
+    points: int = Field(ge=0)
+
+
 class PromoCodeCreateRequest(BaseModel):
     guest_id: uuid.UUID
     code: str
-    reward_type: Literal["flat_amount", "percentage", "free_tickets"]
-    reward_value: Decimal = Field(ge=0)
+    reward_type: Literal["flat_amount", "percentage", "free_tickets", "points"]
+    # Required for flat_amount / percentage / free_tickets; ignored for
+    # points (which uses points_rates instead) — enforced in the router,
+    # since which fields are required depends on reward_type.
+    reward_value: Optional[Decimal] = Field(default=None, ge=0)
+    # Only meaningful when reward_type is "points" — one entry per ticket
+    # type this code earns points for. Omit or leave empty for any other
+    # reward_type.
+    points_rates: Optional[List[PointsRateItem]] = None
     referral_message_draft: Optional[str] = None
 
 
 class PromoCodeUpdateRequest(BaseModel):
     code: str
-    reward_type: Literal["flat_amount", "percentage", "free_tickets"]
-    reward_value: Decimal = Field(ge=0)
+    reward_type: Literal["flat_amount", "percentage", "free_tickets", "points"]
+    reward_value: Optional[Decimal] = Field(default=None, ge=0)
+    points_rates: Optional[List[PointsRateItem]] = None
     referral_message_draft: Optional[str] = None
 
 
@@ -42,11 +55,15 @@ class PromoCodeResponse(BaseModel):
     guest_id: uuid.UUID
     code: str
     reward_type: str
-    reward_value: Decimal
+    reward_value: Optional[Decimal] = None
+    points_rates: List[PointsRateItem] = []
     referral_message_draft: Optional[str] = None
     created_at: datetime
     # Rollup — computed at read time from this code's attributed sales,
-    # not stored columns.
+    # not stored columns. total_reward is in the code's own reward unit
+    # (dollars for flat/percentage, a ticket count for free_tickets,
+    # points for points) — every sale under one code shares reward_type,
+    # so summing is always unit-consistent.
     sale_count: int = 0
     total_reward: Optional[Decimal] = None
 
@@ -61,6 +78,7 @@ class SaleResponse(BaseModel):
     buyer_name: Optional[str] = None
     buyer_email: Optional[str] = None
     amount: Optional[Decimal] = None
+    ticket_type: Optional[str] = None
     sale_date: Optional[str] = None
     external_transaction_id: Optional[str] = None
     source: str
@@ -75,6 +93,7 @@ class SalesImportRow(BaseModel):
     buyer_name: Optional[str] = None
     buyer_email: Optional[str] = None
     amount: Optional[Decimal] = None
+    ticket_type: Optional[str] = None
     promo_code: Optional[str] = None
     sale_date: Optional[str] = None
     external_transaction_id: Optional[str] = None

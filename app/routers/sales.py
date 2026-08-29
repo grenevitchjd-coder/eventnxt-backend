@@ -6,9 +6,11 @@ from sqlalchemy.orm import Session
 from app.database import get_db
 from app.models.guest import Guest
 from app.models.promo_code import PromoCode, RewardType
+from app.models.promo_code_points_rate import PromoCodePointsRate
 from app.models.sale import Sale
 from app.models.sales_config import SalesConfig, SalesPlatform
 from app.schemas.sales import (
+    PointsRateItem,
     PromoCodeCreateRequest,
     PromoCodeResponse,
     PromoCodeUpdateRequest,
@@ -29,6 +31,7 @@ def _serialize_promo_code(db: Session, code: PromoCode) -> PromoCodeResponse:
     code_sales = db.query(Sale).filter(Sale.promo_code_id == code.id).all()
     rewards = [s.computed_reward for s in code_sales if s.computed_reward is not None]
     total_reward = sum(rewards) if rewards else None
+    rate_rows = db.query(PromoCodePointsRate).filter(PromoCodePointsRate.promo_code_id == code.id).all()
     return PromoCodeResponse(
         id=code.id,
         event_id=code.event_id,
@@ -36,11 +39,30 @@ def _serialize_promo_code(db: Session, code: PromoCode) -> PromoCodeResponse:
         code=code.code,
         reward_type=code.reward_type.value,
         reward_value=code.reward_value,
+        points_rates=[PointsRateItem(ticket_type=r.ticket_type, points=r.points) for r in rate_rows],
         referral_message_draft=code.referral_message_draft,
         created_at=code.created_at,
         sale_count=len(code_sales),
         total_reward=total_reward,
     )
+
+
+def _validate_reward_fields(reward_type: str, reward_value, points_rates):
+    """
+    Which fields are required depends on reward_type — enforced here
+    rather than in the schema, since Pydantic alone can't express
+    "reward_value is required unless reward_type is points."
+    """
+    if reward_type == "points":
+        if reward_value is not None:
+            raise HTTPException(status_code=400, detail="reward_value isn't used for a points code — use points_rates instead.")
+    else:
+        if reward_value is None:
+            raise HTTPException(status_code=400, detail=f'reward_value is required for a "{reward_type}" code.')
+        if points_rates:
+            raise HTTPException(
+                status_code=400, detail="points_rates only applies to a points-type code."
+            )
 
 
 # ---------- Sales platform setup ----------
@@ -94,6 +116,8 @@ def create_promo_code(
     if existing:
         raise HTTPException(status_code=400, detail=f'The code "{payload.code}" is already in use for this event.')
 
+    _validate_reward_fields(payload.reward_type, payload.reward_value, payload.points_rates)
+
     code = PromoCode(
         event_id=event_id,
         guest_id=payload.guest_id,
@@ -103,6 +127,11 @@ def create_promo_code(
         referral_message_draft=payload.referral_message_draft,
     )
     db.add(code)
+    db.flush()  # assigns code.id without committing, needed for the FK below
+
+    if payload.reward_type == "points" and payload.points_rates:
+        sales_service.replace_points_rates(db, code.id, payload.points_rates)
+
     db.commit()
     db.refresh(code)
     return _serialize_promo_code(db, code)
@@ -139,10 +168,16 @@ def update_promo_code(
                 status_code=400, detail=f'The code "{payload.code}" is already in use for this event.'
             )
 
+    _validate_reward_fields(payload.reward_type, payload.reward_value, payload.points_rates)
+
     code.code = payload.code
     code.reward_type = RewardType(payload.reward_type)
     code.reward_value = payload.reward_value
     code.referral_message_draft = payload.referral_message_draft
+
+    if payload.reward_type == "points":
+        sales_service.replace_points_rates(db, code.id, payload.points_rates or [])
+
     db.commit()
     db.refresh(code)
     return _serialize_promo_code(db, code)
@@ -164,6 +199,7 @@ def delete_promo_code(
             status_code=400,
             detail=f"Can't delete — {sale_count} sale(s) are already attributed to this code.",
         )
+    db.query(PromoCodePointsRate).filter(PromoCodePointsRate.promo_code_id == code_id).delete()
     db.delete(code)
     db.commit()
 
@@ -209,6 +245,7 @@ def import_sales(
                 "buyer_name": row.buyer_name,
                 "buyer_email": row.buyer_email,
                 "amount": row.amount,
+                "ticket_type": row.ticket_type,
                 "promo_code": row.promo_code,
                 "sale_date": row.sale_date,
                 "external_transaction_id": row.external_transaction_id,

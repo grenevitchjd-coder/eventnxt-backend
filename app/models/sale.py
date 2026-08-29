@@ -41,6 +41,8 @@ class Sale(Base):
     buyer_name = Column(String, nullable=True)
     buyer_email = Column(String, nullable=True)
     amount = Column(Numeric, nullable=True)  # needed to compute a PERCENTAGE reward; optional otherwise
+    ticket_type = Column(String, nullable=True)  # free text, matched (case-insensitively) against a POINTS
+    # code's per-ticket-type earning rates — see PromoCodePointsRate
     sale_date = Column(String, nullable=True)  # ISO date string, consistent with Guest.visit_date elsewhere
     external_transaction_id = Column(String, nullable=True, index=True)
 

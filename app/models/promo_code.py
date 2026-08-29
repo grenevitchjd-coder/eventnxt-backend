@@ -12,6 +12,7 @@ class RewardType(str, enum.Enum):
     FLAT_AMOUNT = "flat_amount"  # reward_value is a dollar amount per sale
     PERCENTAGE = "percentage"  # reward_value is a percent of the sale amount (needs Sale.amount to compute)
     FREE_TICKETS = "free_tickets"  # reward_value is a ticket count owed, not a dollar figure
+    POINTS = "points"  # reward_value is unused — earning is per-ticket-type, see PromoCodePointsRate
 
 
 class PromoCode(Base):
@@ -22,6 +23,13 @@ class PromoCode(Base):
     One referrer can hold several codes (e.g. one per channel), each with
     its own reward terms, so two codes for the same person aren't forced
     to share a deal.
+
+    reward_value is nullable because a POINTS code doesn't use it at
+    all — its earning rates live in PromoCodePointsRate instead, one row
+    per ticket type, since points are earned per ticket type sold, not
+    as a single flat number. Every other reward type still requires
+    reward_value — that's enforced at the API layer, not the schema,
+    since which fields are required depends on reward_type.
 
     referral_message_draft stores the "here's what to send your friends"
     text an organizer drafts for the referrer — captured even though
@@ -42,6 +50,6 @@ class PromoCode(Base):
     reward_type = Column(
         SAEnum(RewardType, name="reward_type", values_callable=lambda e: [x.value for x in e]), nullable=False
     )
-    reward_value = Column(Numeric, nullable=False)
+    reward_value = Column(Numeric, nullable=True)
     referral_message_draft = Column(Text, nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
