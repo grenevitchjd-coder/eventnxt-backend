@@ -12,6 +12,16 @@ class EventProfileCreateOrUpdateRequest(BaseModel):
     external_ticket_url: Optional[str] = None
     slug: Optional[str] = None  # if omitted, auto-generated from title
 
+    # ---- Public-page personalization (null = original default look) ----
+    # logo_position / banner_focus are small closed sets, so they're
+    # validated as Literals. font_family is deliberately a free string:
+    # the curated list lives in the frontend, and adding a font there
+    # shouldn't require a backend redeploy to be accepted.
+    font_family: Optional[str] = None
+    logo_position: Optional[Literal["centered", "top-left", "top-center", "top-right", "hidden"]] = None
+    banner_focus: Optional[Literal["center", "top", "bottom"]] = None
+    about_us: Optional[str] = None
+
 
 class EventProfileResponse(BaseModel):
     id: uuid.UUID
@@ -22,6 +32,10 @@ class EventProfileResponse(BaseModel):
     banner_photo_url: Optional[str] = None
     logo_url: Optional[str] = None
     external_ticket_url: Optional[str] = None
+    font_family: Optional[str] = None
+    logo_position: Optional[str] = None
+    banner_focus: Optional[str] = None
+    about_us: Optional[str] = None
     cached_start_date: Optional[datetime] = None
     cached_end_date: Optional[datetime] = None
     slug: str
@@ -152,6 +166,10 @@ class PublicEventProfileResponse(BaseModel):
     banner_photo_url: Optional[str] = None
     logo_url: Optional[str] = None
     external_ticket_url: Optional[str] = None
+    font_family: Optional[str] = None
+    logo_position: Optional[str] = None
+    banner_focus: Optional[str] = None
+    about_us: Optional[str] = None
     cached_start_date: Optional[datetime] = None
     cached_end_date: Optional[datetime] = None
     links: list[EventProfileLinkResponse] = []

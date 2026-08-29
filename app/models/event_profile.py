@@ -32,6 +32,15 @@ class EventProfile(Base):
     logo_url = Column(String, nullable=True)
     external_ticket_url = Column(String, nullable=True)
 
+    # ---- Public-page personalization ----
+    # All nullable, and null always means "the original default look" —
+    # so every profile that existed before these columns renders exactly
+    # as it always has, without any backfill.
+    font_family = Column(String, nullable=True)  # display font; null = Fraunces (the original)
+    logo_position = Column(String, nullable=True)  # null/centered | top-left | top-center | top-right | hidden
+    banner_focus = Column(String, nullable=True)  # which part of the banner survives the crop: null/center | top | bottom
+    about_us = Column(Text, nullable=True)  # optional "About Us" section near the bottom of the page
+
     # Events360 owns the real start/end dates. Cached here (refreshed
     # whenever the organizer loads or saves this profile, which already
     # calls Events360) so the PUBLIC page — which has no login and can't
