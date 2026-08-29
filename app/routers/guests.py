@@ -1,4 +1,5 @@
 import secrets
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
@@ -9,7 +10,13 @@ from app.models.guest_ticket_allotment import GuestTicketAllotment
 from app.models.guest_type import GuestType
 from app.models.guest_type_seating_priority import GuestTypeSeatingPriority
 from app.models.seating_category import SeatingCategory
-from app.schemas.guest import GuestCreateRequest, GuestUpdateRequest, GuestResponse, TicketAllotmentDayItem
+from app.schemas.guest import (
+    GuestCreateRequest,
+    GuestUpdateRequest,
+    GuestResponse,
+    GuestSentStatusRequest,
+    TicketAllotmentDayItem,
+)
 from app.services import seating
 from app.services.deps import CurrentUser
 from app.services.event_access import require_event_access
@@ -20,10 +27,13 @@ router = APIRouter(prefix="/events/{event_id}/guests", tags=["guests"])
 def _serialize_guest(db: Session, guest: Guest) -> GuestResponse:
     """
     GuestResponse.ticket_allotment isn't a raw column — it's this guest's
-    own override rows (empty if not overridden), which have to be fetched
-    separately rather than relying on automatic ORM-to-schema conversion.
+    own override rows (empty if not overridden), and allotment_total /
+    allotment_distributed are computed aggregates — none of these come
+    from automatic ORM-to-schema conversion, so they're fetched and
+    assembled explicitly here.
     """
     rows = db.query(GuestTicketAllotment).filter(GuestTicketAllotment.guest_id == guest.id).all()
+    allotment_total, allotment_distributed = seating.allotment_summary(db, guest)
     return GuestResponse(
         id=guest.id,
         event_id=guest.event_id,
@@ -35,12 +45,16 @@ def _serialize_guest(db: Session, guest: Guest) -> GuestResponse:
         party_size=guest.party_size,
         ticket_allotment_overridden=guest.ticket_allotment_overridden,
         ticket_allotment=[TicketAllotmentDayItem(date=r.date, quantity=r.quantity) for r in rows],
+        allotment_total=allotment_total,
+        allotment_distributed=allotment_distributed,
         visit_date=guest.visit_date,
         allocated_by_guest_id=guest.allocated_by_guest_id,
         rsvp_token=guest.rsvp_token,
         rsvp_confirmed=guest.rsvp_confirmed,
+        link_sent_at=guest.link_sent_at,
         created_at=guest.created_at,
     )
+
 
 
 @router.post("", response_model=GuestResponse, status_code=201)
@@ -183,6 +197,30 @@ def update_guest(
         guest.ticket_allotment_overridden = True
         seating.replace_guest_ticket_allotment(db, guest.id, payload.ticket_allotment)
 
+    db.commit()
+    db.refresh(guest)
+    return _serialize_guest(db, guest)
+
+
+@router.patch("/{guest_id}/sent-status", response_model=GuestResponse)
+def set_guest_sent_status(
+    event_id: str,
+    guest_id: str,
+    payload: GuestSentStatusRequest,
+    db: Session = Depends(get_db),
+    user: CurrentUser = Depends(require_event_access),
+):
+    """
+    Manually mark whether this guest's RSVP link has been sent — there's
+    no automated email yet, so this is the organizer's own record-keeping.
+    Setting sent=true stamps the current time; sent=false clears it back
+    to null (e.g. correcting an accidental click), not a "sent then
+    un-sent" history — there's only ever one timestamp.
+    """
+    guest = db.query(Guest).filter(Guest.id == guest_id, Guest.event_id == event_id).first()
+    if not guest:
+        raise HTTPException(status_code=404, detail="Guest not found.")
+    guest.link_sent_at = datetime.now(timezone.utc) if payload.sent else None
     db.commit()
     db.refresh(guest)
     return _serialize_guest(db, guest)

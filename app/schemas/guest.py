@@ -47,11 +47,20 @@ class GuestResponse(BaseModel):
     party_size: int
     ticket_allotment_overridden: bool
     ticket_allotment: List[TicketAllotmentDayItem] = []
+    # Aggregate across all days — "12 of 20 given out" at a glance in the
+    # organizer's guest list. Both 0 for a guest with no allotment at all.
+    allotment_total: int = 0
+    allotment_distributed: int = 0
     visit_date: Optional[str] = None
     allocated_by_guest_id: Optional[uuid.UUID] = None
     rsvp_token: str
     rsvp_confirmed: Optional[str] = None
+    link_sent_at: Optional[datetime] = None
     created_at: datetime
 
     class Config:
         from_attributes = True
+
+
+class GuestSentStatusRequest(BaseModel):
+    sent: bool

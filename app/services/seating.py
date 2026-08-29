@@ -147,6 +147,30 @@ def is_allotment_holder(allotment: dict) -> bool:
     return any(q > 0 for q in allotment.values())
 
 
+def allotment_summary(db: Session, guest: Guest):
+    """
+    (total, distributed) across ALL days of a guest's allotment — for
+    surfacing "12 of 20 tickets given out" in the organizer's guest list,
+    without needing a separate call per guest. (0, 0) for a guest with no
+    allotment at all. Sums every distributed child's party_size
+    regardless of which specific day they're for, matching how the RSVP
+    page's per-day breakdown adds up in total — this is the same
+    aggregate, just not split by day, since the organizer list is a
+    glance-at-a-row view rather than a day-by-day planning view.
+    """
+    allotment = effective_allotment(db, guest)
+    total = sum(allotment.values())
+    if total == 0:
+        return 0, 0
+    distributed = (
+        db.query(func.coalesce(func.sum(Guest.party_size), 0))
+        .filter(Guest.allocated_by_guest_id == guest.id)
+        .scalar()
+        or 0
+    )
+    return total, distributed
+
+
 def replace_guest_ticket_allotment(db: Session, guest_id: str, items) -> None:
     """
     Wholesale replace a guest's own per-day override rows with `items`

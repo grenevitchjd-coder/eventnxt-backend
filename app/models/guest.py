@@ -88,6 +88,12 @@ class Guest(Base):
     rsvp_token = Column(String, unique=True, nullable=False, index=True)
     rsvp_confirmed = Column(String, nullable=True)  # simple for now: null/pending, "yes", "no"
 
+    # Set (to the send time) when the organizer marks this guest's RSVP
+    # link as sent — manual, since there's no automated email yet. Null
+    # means "not sent." Doubles as a boolean via the null check while
+    # also recording when, for follow-up purposes.
+    link_sent_at = Column(DateTime(timezone=True), nullable=True)
+
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
     guest_type = relationship("GuestType")
