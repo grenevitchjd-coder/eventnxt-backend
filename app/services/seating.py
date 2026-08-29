@@ -3,8 +3,10 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.models.guest import Guest, GuestAllocationStatus
+from app.models.guest_ticket_allotment import GuestTicketAllotment
 from app.models.guest_type import GuestType
 from app.models.guest_type_seating_priority import GuestTypeSeatingPriority
+from app.models.guest_type_ticket_allotment import GuestTypeTicketAllotment
 from app.models.seating_category import SeatingCategory
 
 
@@ -113,18 +115,53 @@ def has_seating_priorities(db: Session, guest_type_id: str) -> bool:
     )
 
 
-def effective_allotment(guest: Guest, guest_type: GuestType):
-    """A guest's own allotment override, falling back to the guest type's default."""
-    ticket_count = (
-        guest.allotment_ticket_count if guest.allotment_ticket_count is not None else guest_type.default_ticket_count
-    )
-    valid_dates = (
-        guest.allotment_valid_dates if guest.allotment_valid_dates is not None else guest_type.default_valid_dates
-    )
-    return ticket_count, valid_dates
+def effective_allotment(db: Session, guest: Guest) -> dict:
+    """
+    A guest's per-day ticket allotment — {date: quantity}. Uses the
+    guest's own override rows if ticket_allotment_overridden is set,
+    otherwise inherits the guest type's default rows.
+
+    A guest created via someone else's distribution
+    (allocated_by_guest_id set) ALWAYS gets {} here, regardless of the
+    override flag or their type's default — distribution is one level
+    deep on purpose. Without this check, a delegated recipient sharing a
+    guest type with their distributor (the common case — see the
+    distribute endpoint) would incorrectly inherit the type's default
+    allotment and look like a distributor themselves.
+    """
+    if guest.allocated_by_guest_id is not None:
+        return {}
+
+    if guest.ticket_allotment_overridden:
+        rows = db.query(GuestTicketAllotment).filter(GuestTicketAllotment.guest_id == guest.id).all()
+    else:
+        rows = (
+            db.query(GuestTypeTicketAllotment)
+            .filter(GuestTypeTicketAllotment.guest_type_id == guest.guest_type_id)
+            .all()
+        )
+    return {r.date: r.quantity for r in rows}
 
 
-def check_allotment_capacity(db: Session, parent_guest_id: str, additional_total: int, total_allotment: int):
+def is_allotment_holder(allotment: dict) -> bool:
+    return any(q > 0 for q in allotment.values())
+
+
+def replace_guest_ticket_allotment(db: Session, guest_id: str, items) -> None:
+    """
+    Wholesale replace a guest's own per-day override rows with `items`
+    (a list of objects with .date and .quantity — accepts the Pydantic
+    schema items directly). Does NOT touch ticket_allotment_overridden;
+    the caller sets that.
+    """
+    db.query(GuestTicketAllotment).filter(GuestTicketAllotment.guest_id == guest_id).delete()
+    for item in items:
+        db.add(GuestTicketAllotment(guest_id=guest_id, date=item.date, quantity=item.quantity))
+
+
+def check_allotment_capacity_per_day(
+    db: Session, parent_guest_id: str, requested_by_day: dict, allotment: dict
+):
     """
     Row-level lock on the PARENT guest (the model/sponsor distributing
     tickets) — holds it for the rest of this transaction so two
@@ -133,18 +170,26 @@ def check_allotment_capacity(db: Session, parent_guest_id: str, additional_total
     transaction (the parent), so unlike seating there's no multi-row
     lock-ordering to worry about — different parents' distributions never
     contend with each other.
+
+    Checked PER DAY, not as one combined total — "10 Thursday, 5
+    Saturday" are separate pools, so using up all 10 Thursday tickets
+    must never block someone from getting a Saturday ticket, and vice
+    versa.
     """
     db.query(Guest).filter(Guest.id == parent_guest_id).with_for_update().first()
 
-    distributed = (
-        db.query(func.coalesce(func.sum(Guest.party_size), 0))
-        .filter(Guest.allocated_by_guest_id == parent_guest_id)
-        .scalar()
-        or 0
-    )
-    if distributed + additional_total > total_allotment:
-        remaining = max(total_allotment - distributed, 0)
-        raise HTTPException(
-            status_code=400,
-            detail=f"Only {remaining} ticket(s) remaining — tried to allocate {additional_total}.",
-        )
+    children = db.query(Guest).filter(Guest.allocated_by_guest_id == parent_guest_id).all()
+    distributed_by_day = {}
+    for c in children:
+        if c.visit_date:
+            distributed_by_day[c.visit_date] = distributed_by_day.get(c.visit_date, 0) + c.party_size
+
+    for date, requested_qty in requested_by_day.items():
+        total_for_day = allotment.get(date, 0)
+        already = distributed_by_day.get(date, 0)
+        if already + requested_qty > total_for_day:
+            remaining = max(total_for_day - already, 0)
+            raise HTTPException(
+                status_code=400,
+                detail=f"Only {remaining} ticket(s) remaining for {date} — tried to allocate {requested_qty}.",
+            )

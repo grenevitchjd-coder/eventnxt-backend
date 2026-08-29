@@ -5,6 +5,7 @@ from app.database import get_db
 from app.models.guest import Guest
 from app.models.guest_type import GuestType
 from app.models.guest_type_seating_priority import GuestTypeSeatingPriority
+from app.models.guest_type_ticket_allotment import GuestTypeTicketAllotment
 from app.models.seating_category import SeatingCategory
 from app.schemas.guest_type import (
     GuestTypeCreateRequest,
@@ -12,6 +13,8 @@ from app.schemas.guest_type import (
     GuestTypeResponse,
     GuestTypeSeatingPriorityCreateRequest,
     GuestTypeSeatingPriorityResponse,
+    TicketAllotmentDayResponse,
+    TicketAllotmentDayUpsertRequest,
 )
 from app.services.deps import CurrentUser
 from app.services.event_access import require_event_access
@@ -38,15 +41,10 @@ def create_guest_type(
     """
     Event-scoped — different events for the same org can define their own
     guest types, since who gets invited varies event to event. Seating
-    preferences are added separately as an ordered list — see the
-    /seating-priorities endpoints below.
+    preferences and the ticket allotment are both added separately — see
+    the /seating-priorities and /ticket-allotments endpoints below.
     """
-    guest_type = GuestType(
-        event_id=event_id,
-        name=payload.name,
-        default_ticket_count=payload.default_ticket_count,
-        default_valid_dates=payload.default_valid_dates,
-    )
+    guest_type = GuestType(event_id=event_id, name=payload.name)
     db.add(guest_type)
     db.commit()
     db.refresh(guest_type)
@@ -70,8 +68,6 @@ def update_guest_type(
 ):
     guest_type = _get_guest_type_or_404(db, event_id, guest_type_id)
     guest_type.name = payload.name
-    guest_type.default_ticket_count = payload.default_ticket_count
-    guest_type.default_valid_dates = payload.default_valid_dates
     db.commit()
     db.refresh(guest_type)
     return guest_type
@@ -96,6 +92,9 @@ def delete_guest_type(
 
     db.query(GuestTypeSeatingPriority).filter(
         GuestTypeSeatingPriority.guest_type_id == guest_type_id
+    ).delete()
+    db.query(GuestTypeTicketAllotment).filter(
+        GuestTypeTicketAllotment.guest_type_id == guest_type_id
     ).delete()
     db.delete(guest_type)
     db.commit()
@@ -176,4 +175,73 @@ def delete_seating_priority(
     if not priority:
         raise HTTPException(status_code=404, detail="Priority entry not found.")
     db.delete(priority)
+    db.commit()
+
+
+# ---------- Per-day ticket allotment (default for guests of this type) ----------
+
+
+@router.get("/{guest_type_id}/ticket-allotments", response_model=list[TicketAllotmentDayResponse])
+def list_ticket_allotments(
+    event_id: str,
+    guest_type_id: str,
+    db: Session = Depends(get_db),
+    user: CurrentUser = Depends(require_event_access),
+):
+    _get_guest_type_or_404(db, event_id, guest_type_id)
+    return (
+        db.query(GuestTypeTicketAllotment)
+        .filter(GuestTypeTicketAllotment.guest_type_id == guest_type_id)
+        .order_by(GuestTypeTicketAllotment.date)
+        .all()
+    )
+
+
+@router.put("/{guest_type_id}/ticket-allotments/{date}", response_model=TicketAllotmentDayResponse)
+def upsert_ticket_allotment_day(
+    event_id: str,
+    guest_type_id: str,
+    date: str,
+    payload: TicketAllotmentDayUpsertRequest,
+    db: Session = Depends(get_db),
+    user: CurrentUser = Depends(require_event_access),
+):
+    """
+    Set (or update) the ticket quantity for one specific day — "10 for
+    Thursday" is its own separate pool from "5 for Saturday," so each day
+    is addressed individually rather than resending the whole set.
+    """
+    _get_guest_type_or_404(db, event_id, guest_type_id)
+    row = (
+        db.query(GuestTypeTicketAllotment)
+        .filter(GuestTypeTicketAllotment.guest_type_id == guest_type_id, GuestTypeTicketAllotment.date == date)
+        .first()
+    )
+    if row:
+        row.quantity = payload.quantity
+    else:
+        row = GuestTypeTicketAllotment(guest_type_id=guest_type_id, date=date, quantity=payload.quantity)
+        db.add(row)
+    db.commit()
+    db.refresh(row)
+    return row
+
+
+@router.delete("/{guest_type_id}/ticket-allotments/{date}", status_code=204)
+def delete_ticket_allotment_day(
+    event_id: str,
+    guest_type_id: str,
+    date: str,
+    db: Session = Depends(get_db),
+    user: CurrentUser = Depends(require_event_access),
+):
+    _get_guest_type_or_404(db, event_id, guest_type_id)
+    row = (
+        db.query(GuestTypeTicketAllotment)
+        .filter(GuestTypeTicketAllotment.guest_type_id == guest_type_id, GuestTypeTicketAllotment.date == date)
+        .first()
+    )
+    if not row:
+        raise HTTPException(status_code=404, detail="No allotment set for that date.")
+    db.delete(row)
     db.commit()

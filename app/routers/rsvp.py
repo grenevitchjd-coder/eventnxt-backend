@@ -7,6 +7,7 @@ from app.database import get_db
 from app.models.guest import Guest, GuestAllocationStatus
 from app.models.guest_type import GuestType
 from app.schemas.rsvp import (
+    DayAllotment,
     DistributedRecipient,
     RSVPDistributeRequest,
     RSVPInfoResponse,
@@ -29,10 +30,9 @@ def get_rsvp_info(token: str, db: Session = Depends(get_db)):
     guest = _get_guest_by_token_or_404(db, token)
     guest_type = db.query(GuestType).filter(GuestType.id == guest.guest_type_id).first()
 
-    ticket_count, valid_dates = seating.effective_allotment(guest, guest_type)
-    is_allotment_holder = ticket_count is not None and ticket_count > 0
+    allotment = seating.effective_allotment(db, guest)
 
-    if not is_allotment_holder:
+    if not seating.is_allotment_holder(allotment):
         return RSVPInfoResponse(
             guest_name=guest.name,
             guest_type_name=guest_type.name,
@@ -43,7 +43,20 @@ def get_rsvp_info(token: str, db: Session = Depends(get_db)):
         )
 
     children = db.query(Guest).filter(Guest.allocated_by_guest_id == guest.id).all()
-    distributed_total = sum(c.party_size for c in children)
+    distributed_by_day = {}
+    for c in children:
+        if c.visit_date:
+            distributed_by_day[c.visit_date] = distributed_by_day.get(c.visit_date, 0) + c.party_size
+
+    day_allotments = [
+        DayAllotment(
+            date=date,
+            total=total,
+            distributed=distributed_by_day.get(date, 0),
+            remaining=max(total - distributed_by_day.get(date, 0), 0),
+        )
+        for date, total in sorted(allotment.items())
+    ]
 
     return RSVPInfoResponse(
         guest_name=guest.name,
@@ -52,10 +65,7 @@ def get_rsvp_info(token: str, db: Session = Depends(get_db)):
         visit_date=guest.visit_date,
         party_size=guest.party_size,
         is_allotment_holder=True,
-        ticket_count=ticket_count,
-        valid_dates=valid_dates,
-        tickets_distributed=distributed_total,
-        tickets_remaining=max(ticket_count - distributed_total, 0),
+        day_allotments=day_allotments,
         distributed_recipients=[
             DistributedRecipient(
                 name=c.name,
@@ -77,10 +87,8 @@ def respond_to_rsvp(token: str, payload: RSVPRespondRequest, db: Session = Depen
     Not for allotment holders — they use /distribute instead.
     """
     guest = _get_guest_by_token_or_404(db, token)
-    guest_type = db.query(GuestType).filter(GuestType.id == guest.guest_type_id).first()
-
-    ticket_count, _ = seating.effective_allotment(guest, guest_type)
-    if ticket_count is not None and ticket_count > 0:
+    allotment = seating.effective_allotment(db, guest)
+    if seating.is_allotment_holder(allotment):
         raise HTTPException(
             status_code=400, detail="This link is for distributing tickets, not a simple RSVP — use /distribute."
         )
@@ -107,30 +115,31 @@ def respond_to_rsvp(token: str, payload: RSVPRespondRequest, db: Session = Depen
 def distribute_tickets(token: str, payload: RSVPDistributeRequest, db: Session = Depends(get_db)):
     """
     An allotment holder (model, sponsor) naming who gets their tickets.
-    Only checks the TICKET COUNT limit here — each named recipient still
-    gets their own RSVP link and personally confirms via /respond, which
-    is when their actual seat is resolved and checked. This mirrors how
-    an organizer-added guest starts pending and only consumes a seat once
-    confirmed — nothing here holds a seat until the recipient says yes.
+    Only checks the TICKET COUNT limit here, per day — each named
+    recipient still gets their own RSVP link and personally confirms via
+    /respond, which is when their actual seat is resolved and checked.
+    This mirrors how an organizer-added guest starts pending and only
+    consumes a seat once confirmed — nothing here holds a seat until the
+    recipient says yes.
     """
     guest = _get_guest_by_token_or_404(db, token)
-    guest_type = db.query(GuestType).filter(GuestType.id == guest.guest_type_id).first()
-
-    ticket_count, valid_dates = seating.effective_allotment(guest, guest_type)
-    if ticket_count is None or ticket_count <= 0:
+    allotment = seating.effective_allotment(db, guest)
+    if not seating.is_allotment_holder(allotment):
         raise HTTPException(status_code=400, detail="This link doesn't have tickets to distribute.")
 
     if not payload.recipients:
         raise HTTPException(status_code=400, detail="Add at least one recipient.")
 
     for r in payload.recipients:
-        if valid_dates and r.visit_date and r.visit_date not in valid_dates:
+        if r.visit_date not in allotment:
             raise HTTPException(
                 status_code=400, detail=f'"{r.visit_date}" isn\'t one of the valid dates for these tickets.'
             )
 
-    requested_total = sum(r.party_size for r in payload.recipients)
-    seating.check_allotment_capacity(db, str(guest.id), requested_total, ticket_count)
+    requested_by_day = {}
+    for r in payload.recipients:
+        requested_by_day[r.visit_date] = requested_by_day.get(r.visit_date, 0) + r.party_size
+    seating.check_allotment_capacity_per_day(db, str(guest.id), requested_by_day, allotment)
 
     for r in payload.recipients:
         db.add(
@@ -144,12 +153,11 @@ def distribute_tickets(token: str, payload: RSVPDistributeRequest, db: Session =
                 party_size=r.party_size,
                 visit_date=r.visit_date,
                 allocated_by_guest_id=guest.id,
-                # Explicit 0, not left as None — None would inherit the
-                # guest type's default allotment and wrongly make this
-                # recipient look like a distributor themselves. A
-                # delegated recipient is always terminal: they confirm
-                # for themselves, they don't get to redistribute further.
-                allotment_ticket_count=0,
+                # ticket_allotment_overridden doesn't actually matter here
+                # since effective_allotment() always returns {} for any
+                # guest with allocated_by_guest_id set — but leaving it
+                # False (the default) is correct either way: this
+                # recipient never distributes further.
                 rsvp_token=secrets.token_urlsafe(24),
             )
         )

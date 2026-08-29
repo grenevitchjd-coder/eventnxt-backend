@@ -5,6 +5,11 @@ from typing import List, Literal, Optional
 from pydantic import BaseModel, EmailStr, Field
 
 
+class TicketAllotmentDayItem(BaseModel):
+    date: str
+    quantity: int = Field(ge=0)
+
+
 class GuestCreateRequest(BaseModel):
     name: str
     email: EmailStr
@@ -12,11 +17,12 @@ class GuestCreateRequest(BaseModel):
     seating_category_id: Optional[uuid.UUID] = None
     allocation_status: Literal["confirmed", "pending", "declined"] = "confirmed"
     party_size: int = Field(default=1, ge=1)
-    # Allotment fields — only meaningful on a guest who's meant to hold and
-    # distribute tickets (models, sponsors). Omit for an ordinary guest.
-    allotment_ticket_count: Optional[int] = Field(default=None, ge=0)
-    allotment_valid_dates: Optional[List[str]] = None
     visit_date: Optional[str] = None
+    # Per-guest override of the guest type's default ticket allotment.
+    # Omit entirely to inherit the type's default. Provide a list
+    # (including an empty one, to mean "explicitly nothing to give out")
+    # to override it — see Guest.ticket_allotment_overridden.
+    ticket_allotment: Optional[List[TicketAllotmentDayItem]] = None
 
 
 class GuestUpdateRequest(BaseModel):
@@ -26,9 +32,8 @@ class GuestUpdateRequest(BaseModel):
     seating_category_id: Optional[uuid.UUID] = None
     allocation_status: Literal["confirmed", "pending", "declined"] = "confirmed"
     party_size: int = Field(default=1, ge=1)
-    allotment_ticket_count: Optional[int] = Field(default=None, ge=0)
-    allotment_valid_dates: Optional[List[str]] = None
     visit_date: Optional[str] = None
+    ticket_allotment: Optional[List[TicketAllotmentDayItem]] = None
 
 
 class GuestResponse(BaseModel):
@@ -40,8 +45,8 @@ class GuestResponse(BaseModel):
     seating_category_id: Optional[uuid.UUID] = None
     allocation_status: str
     party_size: int
-    allotment_ticket_count: Optional[int] = None
-    allotment_valid_dates: Optional[List[str]] = None
+    ticket_allotment_overridden: bool
+    ticket_allotment: List[TicketAllotmentDayItem] = []
     visit_date: Optional[str] = None
     allocated_by_guest_id: Optional[uuid.UUID] = None
     rsvp_token: str

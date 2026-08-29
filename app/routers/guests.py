@@ -5,15 +5,42 @@ from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app.models.guest import Guest, GuestAllocationStatus
+from app.models.guest_ticket_allotment import GuestTicketAllotment
 from app.models.guest_type import GuestType
 from app.models.guest_type_seating_priority import GuestTypeSeatingPriority
 from app.models.seating_category import SeatingCategory
-from app.schemas.guest import GuestCreateRequest, GuestUpdateRequest, GuestResponse
+from app.schemas.guest import GuestCreateRequest, GuestUpdateRequest, GuestResponse, TicketAllotmentDayItem
 from app.services import seating
 from app.services.deps import CurrentUser
 from app.services.event_access import require_event_access
 
 router = APIRouter(prefix="/events/{event_id}/guests", tags=["guests"])
+
+
+def _serialize_guest(db: Session, guest: Guest) -> GuestResponse:
+    """
+    GuestResponse.ticket_allotment isn't a raw column — it's this guest's
+    own override rows (empty if not overridden), which have to be fetched
+    separately rather than relying on automatic ORM-to-schema conversion.
+    """
+    rows = db.query(GuestTicketAllotment).filter(GuestTicketAllotment.guest_id == guest.id).all()
+    return GuestResponse(
+        id=guest.id,
+        event_id=guest.event_id,
+        name=guest.name,
+        email=guest.email,
+        guest_type_id=guest.guest_type_id,
+        seating_category_id=guest.seating_category_id,
+        allocation_status=guest.allocation_status.value,
+        party_size=guest.party_size,
+        ticket_allotment_overridden=guest.ticket_allotment_overridden,
+        ticket_allotment=[TicketAllotmentDayItem(date=r.date, quantity=r.quantity) for r in rows],
+        visit_date=guest.visit_date,
+        allocated_by_guest_id=guest.allocated_by_guest_id,
+        rsvp_token=guest.rsvp_token,
+        rsvp_confirmed=guest.rsvp_confirmed,
+        created_at=guest.created_at,
+    )
 
 
 @router.post("", response_model=GuestResponse, status_code=201)
@@ -77,15 +104,19 @@ def create_guest(
         seating_category_id=effective_seating_category_id,
         allocation_status=GuestAllocationStatus(payload.allocation_status),
         party_size=payload.party_size,
-        allotment_ticket_count=payload.allotment_ticket_count,
-        allotment_valid_dates=payload.allotment_valid_dates,
         visit_date=payload.visit_date,
+        ticket_allotment_overridden=payload.ticket_allotment is not None,
         rsvp_token=secrets.token_urlsafe(24),
     )
     db.add(guest)
+    db.flush()  # assigns guest.id without committing, needed for the FK below
+
+    if payload.ticket_allotment is not None:
+        seating.replace_guest_ticket_allotment(db, guest.id, payload.ticket_allotment)
+
     db.commit()
     db.refresh(guest)
-    return guest
+    return _serialize_guest(db, guest)
 
 
 @router.get("", response_model=list[GuestResponse])
@@ -94,7 +125,8 @@ def list_guests(
     db: Session = Depends(get_db),
     user: CurrentUser = Depends(require_event_access),
 ):
-    return db.query(Guest).filter(Guest.event_id == event_id).all()
+    guests = db.query(Guest).filter(Guest.event_id == event_id).all()
+    return [_serialize_guest(db, g) for g in guests]
 
 
 @router.patch("/{guest_id}", response_model=GuestResponse)
@@ -109,7 +141,9 @@ def update_guest(
     Editing always takes an explicit seating_category_id (or null) — no
     priority-list magic here, unlike creation. Someone editing a specific
     existing guest is making a deliberate choice, not asking the system
-    to decide for them.
+    to decide for them. ticket_allotment works the same way as on create:
+    omit it to leave the guest's existing override (or lack of one)
+    untouched; provide a list to replace it.
     """
     guest = db.query(Guest).filter(Guest.id == guest_id, Guest.event_id == event_id).first()
     if not guest:
@@ -143,12 +177,15 @@ def update_guest(
     guest.seating_category_id = payload.seating_category_id
     guest.allocation_status = GuestAllocationStatus(payload.allocation_status)
     guest.party_size = payload.party_size
-    guest.allotment_ticket_count = payload.allotment_ticket_count
-    guest.allotment_valid_dates = payload.allotment_valid_dates
     guest.visit_date = payload.visit_date
+
+    if payload.ticket_allotment is not None:
+        guest.ticket_allotment_overridden = True
+        seating.replace_guest_ticket_allotment(db, guest.id, payload.ticket_allotment)
+
     db.commit()
     db.refresh(guest)
-    return guest
+    return _serialize_guest(db, guest)
 
 
 @router.delete("/{guest_id}", status_code=204)
@@ -161,5 +198,6 @@ def delete_guest(
     guest = db.query(Guest).filter(Guest.id == guest_id, Guest.event_id == event_id).first()
     if not guest:
         raise HTTPException(status_code=404, detail="Guest not found.")
+    db.query(GuestTicketAllotment).filter(GuestTicketAllotment.guest_id == guest_id).delete()
     db.delete(guest)
     db.commit()

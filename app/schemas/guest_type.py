@@ -1,28 +1,21 @@
 import uuid
 from datetime import datetime
-from typing import List, Optional
 
 from pydantic import BaseModel, Field
 
 
 class GuestTypeCreateRequest(BaseModel):
     name: str
-    default_ticket_count: Optional[int] = Field(default=None, ge=0)
-    default_valid_dates: Optional[List[str]] = None
 
 
 class GuestTypeUpdateRequest(BaseModel):
     name: str
-    default_ticket_count: Optional[int] = Field(default=None, ge=0)
-    default_valid_dates: Optional[List[str]] = None
 
 
 class GuestTypeResponse(BaseModel):
     id: uuid.UUID
     event_id: uuid.UUID
     name: str
-    default_ticket_count: Optional[int] = None
-    default_valid_dates: Optional[List[str]] = None
     created_at: datetime
 
     class Config:
@@ -40,6 +33,18 @@ class GuestTypeSeatingPriorityResponse(BaseModel):
     id: uuid.UUID
     seating_category_id: uuid.UUID
     priority_order: int
+
+    class Config:
+        from_attributes = True
+
+
+class TicketAllotmentDayUpsertRequest(BaseModel):
+    quantity: int = Field(ge=0)
+
+
+class TicketAllotmentDayResponse(BaseModel):
+    date: str
+    quantity: int
 
     class Config:
         from_attributes = True

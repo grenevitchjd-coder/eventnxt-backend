@@ -1,8 +1,8 @@
 import enum
 import uuid
 
-from sqlalchemy import Column, String, DateTime, Enum as SAEnum, ForeignKey, Integer
-from sqlalchemy.dialects.postgresql import ARRAY, UUID
+from sqlalchemy import Boolean, Column, String, DateTime, Enum as SAEnum, ForeignKey, Integer
+from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 
@@ -25,18 +25,27 @@ class Guest(Base):
     foreign key (separate databases). guest_type_id/seating_category_id
     ARE real foreign keys — those tables live in this same database.
 
-    Some guests (models, sponsors) hold an ALLOTMENT — a pool of tickets
-    they distribute to others themselves via their RSVP page, rather
-    than just confirming their own attendance. allotment_ticket_count /
-    allotment_valid_dates describe that pool (null on an ordinary guest
-    who has nothing to distribute). Each ticket they hand out becomes
-    its own Guest row — allocated_by_guest_id links it back to whoever
-    distributed it, party_size is how many of the allotment that one
-    line consumed (default 1, but a distributor can put more than one
-    ticket under a single name), and visit_date is which day THIS
-    guest's own ticket is for. Distribution is one level deep on
-    purpose — a delegated recipient just RSVPs for themselves, they
-    don't get their own allotment to redistribute further.
+    Some guests (models, sponsors) hold an ALLOTMENT — a per-day pool of
+    tickets they distribute to others themselves via their RSVP page,
+    rather than just confirming their own attendance. The allotment
+    itself lives in GuestTicketAllotment rows (one per day, since
+    "10 Thursday, 5 Saturday" are genuinely separate pools, not one
+    shared number) — ticket_allotment_overridden says whether to use
+    THIS guest's own rows or fall back to their guest type's default
+    rows (GuestTypeTicketAllotment). A guest created via someone else's
+    distribution (allocated_by_guest_id set) is always treated as having
+    NO allotment of their own, regardless of this flag or their type's
+    default — see app/services/seating.py's effective_allotment() —
+    because distribution is one level deep on purpose: a delegated
+    recipient just RSVPs for themselves, they don't get to redistribute
+    further.
+
+    Each ticket a distributor hands out becomes its own Guest row —
+    allocated_by_guest_id links it back to whoever distributed it,
+    party_size is how many of the allotment that one line consumed
+    (default 1, but a distributor can put more than one ticket under a
+    single name), and visit_date is which specific day THIS guest's own
+    ticket is for.
     """
 
     __tablename__ = "guests"
@@ -61,11 +70,10 @@ class Guest(Base):
         default=GuestAllocationStatus.CONFIRMED,
     )
 
-    # How many tickets THIS guest can distribute to others, and which
-    # dates those tickets are valid for. Null count = not an allotment
-    # holder, just an ordinary confirm/decline guest.
-    allotment_ticket_count = Column(Integer, nullable=True)
-    allotment_valid_dates = Column(ARRAY(String), nullable=True)  # ISO date strings, e.g. "2026-06-11"
+    # True = use this guest's own GuestTicketAllotment rows (even if
+    # there are none, meaning "explicitly no tickets to distribute").
+    # False = inherit the guest type's default rows entirely.
+    ticket_allotment_overridden = Column(Boolean, nullable=False, default=False)
 
     # How many tickets/seats THIS guest record itself consumes (default
     # 1 — a distributor can bump this for a single named recipient
