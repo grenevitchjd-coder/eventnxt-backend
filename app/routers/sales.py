@@ -7,6 +7,9 @@ from app.database import get_db
 from app.models.guest import Guest
 from app.models.promo_code import PromoCode, RewardType
 from app.models.promo_code_points_rate import PromoCodePointsRate
+from app.models.promo_code_redemption_option import PromoCodeRedemptionOption
+from app.models.redemption_tier import RedemptionTier
+from app.models.reward_redemption import PayoutStatus, RewardRedemption
 from app.models.sale import Sale
 from app.models.sales_config import SalesConfig, SalesPlatform
 from app.schemas.sales import (
@@ -14,12 +17,18 @@ from app.schemas.sales import (
     PromoCodeCreateRequest,
     PromoCodeResponse,
     PromoCodeUpdateRequest,
+    RedemptionOptionResponse,
+    RedemptionOptionUpsertRequest,
+    RedemptionTierCreateRequest,
+    RedemptionTierResponse,
+    RewardRedemptionResponse,
     SaleResponse,
     SalesConfigResponse,
     SalesConfigUpdateRequest,
     SalesImportRequest,
     SalesImportResult,
 )
+from app.services import redemptions as redemptions_service
 from app.services import sales as sales_service
 from app.services.deps import CurrentUser
 from app.services.event_access import require_event_access
@@ -32,6 +41,9 @@ def _serialize_promo_code(db: Session, code: PromoCode) -> PromoCodeResponse:
     rewards = [s.computed_reward for s in code_sales if s.computed_reward is not None]
     total_reward = sum(rewards) if rewards else None
     rate_rows = db.query(PromoCodePointsRate).filter(PromoCodePointsRate.promo_code_id == code.id).all()
+    points_available = (
+        redemptions_service.points_available(db, code.id) if code.reward_type == RewardType.POINTS else None
+    )
     return PromoCodeResponse(
         id=code.id,
         event_id=code.event_id,
@@ -44,6 +56,7 @@ def _serialize_promo_code(db: Session, code: PromoCode) -> PromoCodeResponse:
         created_at=code.created_at,
         sale_count=len(code_sales),
         total_reward=total_reward,
+        points_available=points_available,
     )
 
 
@@ -258,4 +271,232 @@ def import_sales(
     db.commit()
     return SalesImportResult(
         imported=imported, skipped_duplicates=skipped_duplicates, unmatched_code_count=unmatched_code_count
+    )
+
+
+# ---------- Redemption tiers (event-wide shared threshold structure) ----------
+
+
+@router.post("/redemption-tiers", response_model=RedemptionTierResponse, status_code=201)
+def create_redemption_tier(
+    event_id: str,
+    payload: RedemptionTierCreateRequest,
+    db: Session = Depends(get_db),
+    user: CurrentUser = Depends(require_event_access),
+):
+    tier = RedemptionTier(event_id=event_id, points_required=payload.points_required, label=payload.label)
+    db.add(tier)
+    db.commit()
+    db.refresh(tier)
+    return tier
+
+
+@router.get("/redemption-tiers", response_model=list[RedemptionTierResponse])
+def list_redemption_tiers(
+    event_id: str, db: Session = Depends(get_db), user: CurrentUser = Depends(require_event_access)
+):
+    return (
+        db.query(RedemptionTier)
+        .filter(RedemptionTier.event_id == event_id)
+        .order_by(RedemptionTier.points_required)
+        .all()
+    )
+
+
+@router.delete("/redemption-tiers/{tier_id}", status_code=204)
+def delete_redemption_tier(
+    event_id: str,
+    tier_id: str,
+    db: Session = Depends(get_db),
+    user: CurrentUser = Depends(require_event_access),
+):
+    tier = db.query(RedemptionTier).filter(RedemptionTier.id == tier_id, RedemptionTier.event_id == event_id).first()
+    if not tier:
+        raise HTTPException(status_code=404, detail="Redemption tier not found.")
+    redemption_count = db.query(RewardRedemption).filter(RewardRedemption.redemption_tier_id == tier_id).count()
+    if redemption_count > 0:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Can't delete — {redemption_count} redemption(s) have already used this tier.",
+        )
+    db.query(PromoCodeRedemptionOption).filter(PromoCodeRedemptionOption.redemption_tier_id == tier_id).delete()
+    db.delete(tier)
+    db.commit()
+
+
+# ---------- Per-code redemption options (what THIS code offers at a shared tier) ----------
+
+
+@router.get("/promo-codes/{code_id}/redemption-options", response_model=list[RedemptionOptionResponse])
+def list_redemption_options(
+    event_id: str,
+    code_id: str,
+    db: Session = Depends(get_db),
+    user: CurrentUser = Depends(require_event_access),
+):
+    rows = (
+        db.query(PromoCodeRedemptionOption, RedemptionTier)
+        .join(RedemptionTier, PromoCodeRedemptionOption.redemption_tier_id == RedemptionTier.id)
+        .filter(PromoCodeRedemptionOption.promo_code_id == code_id)
+        .order_by(RedemptionTier.points_required)
+        .all()
+    )
+    return [
+        RedemptionOptionResponse(
+            id=option.id,
+            promo_code_id=option.promo_code_id,
+            redemption_tier_id=option.redemption_tier_id,
+            cash_value=option.cash_value,
+            ticket_value=option.ticket_value,
+            tier_points_required=tier.points_required,
+            tier_label=tier.label,
+        )
+        for option, tier in rows
+    ]
+
+
+@router.put(
+    "/promo-codes/{code_id}/redemption-options/{tier_id}", response_model=RedemptionOptionResponse
+)
+def upsert_redemption_option(
+    event_id: str,
+    code_id: str,
+    tier_id: str,
+    payload: RedemptionOptionUpsertRequest,
+    db: Session = Depends(get_db),
+    user: CurrentUser = Depends(require_event_access),
+):
+    if payload.cash_value is None and payload.ticket_value is None:
+        raise HTTPException(status_code=400, detail="Set at least one of cash_value or ticket_value.")
+
+    code = db.query(PromoCode).filter(PromoCode.id == code_id, PromoCode.event_id == event_id).first()
+    if not code:
+        raise HTTPException(status_code=404, detail="Promo code not found.")
+    tier = db.query(RedemptionTier).filter(RedemptionTier.id == tier_id, RedemptionTier.event_id == event_id).first()
+    if not tier:
+        raise HTTPException(status_code=404, detail="Redemption tier not found.")
+
+    option = (
+        db.query(PromoCodeRedemptionOption)
+        .filter(
+            PromoCodeRedemptionOption.promo_code_id == code_id,
+            PromoCodeRedemptionOption.redemption_tier_id == tier_id,
+        )
+        .first()
+    )
+    if option:
+        option.cash_value = payload.cash_value
+        option.ticket_value = payload.ticket_value
+    else:
+        option = PromoCodeRedemptionOption(
+            promo_code_id=code_id,
+            redemption_tier_id=tier_id,
+            cash_value=payload.cash_value,
+            ticket_value=payload.ticket_value,
+        )
+        db.add(option)
+    db.commit()
+    db.refresh(option)
+    return RedemptionOptionResponse(
+        id=option.id,
+        promo_code_id=option.promo_code_id,
+        redemption_tier_id=option.redemption_tier_id,
+        cash_value=option.cash_value,
+        ticket_value=option.ticket_value,
+        tier_points_required=tier.points_required,
+        tier_label=tier.label,
+    )
+
+
+@router.delete("/promo-codes/{code_id}/redemption-options/{tier_id}", status_code=204)
+def delete_redemption_option(
+    event_id: str,
+    code_id: str,
+    tier_id: str,
+    db: Session = Depends(get_db),
+    user: CurrentUser = Depends(require_event_access),
+):
+    option = (
+        db.query(PromoCodeRedemptionOption)
+        .filter(
+            PromoCodeRedemptionOption.promo_code_id == code_id,
+            PromoCodeRedemptionOption.redemption_tier_id == tier_id,
+        )
+        .first()
+    )
+    if not option:
+        raise HTTPException(status_code=404, detail="No option set for this code at this tier.")
+    db.delete(option)
+    db.commit()
+
+
+# ---------- Organizer payout queue ----------
+
+
+@router.get("/reward-redemptions", response_model=list[RewardRedemptionResponse])
+def list_reward_redemptions(
+    event_id: str, db: Session = Depends(get_db), user: CurrentUser = Depends(require_event_access)
+):
+    rows = (
+        db.query(RewardRedemption, PromoCode, Guest)
+        .join(PromoCode, RewardRedemption.promo_code_id == PromoCode.id)
+        .join(Guest, PromoCode.guest_id == Guest.id)
+        .filter(PromoCode.event_id == event_id)
+        .order_by(RewardRedemption.redeemed_at.desc())
+        .all()
+    )
+    return [
+        RewardRedemptionResponse(
+            id=redemption.id,
+            promo_code_id=redemption.promo_code_id,
+            redemption_tier_id=redemption.redemption_tier_id,
+            choice=redemption.choice.value,
+            points_spent=redemption.points_spent,
+            cash_value=redemption.cash_value,
+            ticket_value=redemption.ticket_value,
+            created_guest_id=redemption.created_guest_id,
+            payout_status=redemption.payout_status.value if redemption.payout_status else None,
+            redeemed_at=redemption.redeemed_at,
+            promo_code=code.code,
+            referrer_name=guest.name,
+        )
+        for redemption, code, guest in rows
+    ]
+
+
+@router.patch("/reward-redemptions/{redemption_id}/mark-paid", response_model=RewardRedemptionResponse)
+def mark_redemption_paid(
+    event_id: str,
+    redemption_id: str,
+    db: Session = Depends(get_db),
+    user: CurrentUser = Depends(require_event_access),
+):
+    row = (
+        db.query(RewardRedemption, PromoCode, Guest)
+        .join(PromoCode, RewardRedemption.promo_code_id == PromoCode.id)
+        .join(Guest, PromoCode.guest_id == Guest.id)
+        .filter(RewardRedemption.id == redemption_id, PromoCode.event_id == event_id)
+        .first()
+    )
+    if not row:
+        raise HTTPException(status_code=404, detail="Redemption not found.")
+    redemption, code, guest = row
+    if redemption.payout_status is None:
+        raise HTTPException(status_code=400, detail="This redemption wasn't a cash payout.")
+    redemption.payout_status = PayoutStatus.PAID
+    db.commit()
+    db.refresh(redemption)
+    return RewardRedemptionResponse(
+        id=redemption.id,
+        promo_code_id=redemption.promo_code_id,
+        redemption_tier_id=redemption.redemption_tier_id,
+        choice=redemption.choice.value,
+        points_spent=redemption.points_spent,
+        cash_value=redemption.cash_value,
+        ticket_value=redemption.ticket_value,
+        created_guest_id=redemption.created_guest_id,
+        payout_status=redemption.payout_status.value if redemption.payout_status else None,
+        redeemed_at=redemption.redeemed_at,
+        promo_code=code.code,
+        referrer_name=guest.name,
     )

@@ -8,6 +8,9 @@ from app.models.promo_code import PromoCode, RewardType  # noqa: F401
 from app.models.promo_code_points_rate import PromoCodePointsRate  # noqa: F401
 from app.models.sale import Sale, SaleSource  # noqa: F401
 from app.models.sales_config import SalesConfig, SalesPlatform  # noqa: F401
+from app.models.redemption_tier import RedemptionTier  # noqa: F401
+from app.models.promo_code_redemption_option import PromoCodeRedemptionOption  # noqa: F401
+from app.models.reward_redemption import RewardRedemption, RedemptionChoice, PayoutStatus  # noqa: F401
 from app.models.event_profile import EventProfile  # noqa: F401
 from app.models.event_profile_link import EventProfileLink, LinkKind  # noqa: F401
 from app.models.event_profile_schedule_item import EventProfileScheduleItem  # noqa: F401

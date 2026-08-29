@@ -6,13 +6,20 @@ from sqlalchemy.orm import Session
 from app.database import get_db
 from app.models.guest import Guest, GuestAllocationStatus
 from app.models.guest_type import GuestType
+from app.models.promo_code import PromoCode, RewardType
+from app.models.reward_redemption import RewardRedemption
 from app.schemas.rsvp import (
     DayAllotment,
     DistributedRecipient,
+    EligibleTier,
+    RedemptionHistoryItem,
+    ReferralCodeInfo,
     RSVPDistributeRequest,
     RSVPInfoResponse,
+    RSVPRedeemRequest,
     RSVPRespondRequest,
 )
+from app.services import redemptions as redemptions_service
 from app.services import seating
 
 router = APIRouter(tags=["rsvp"])
@@ -23,6 +30,63 @@ def _get_guest_by_token_or_404(db: Session, token: str) -> Guest:
     if not guest:
         raise HTTPException(status_code=404, detail="That RSVP link isn't valid.")
     return guest
+
+
+def _build_referral_codes(db: Session, event_id: str, guest_id: str):
+    """
+    Every promo code this guest holds, each with its points balance (for
+    a points-type code), which redemption tiers it's currently eligible
+    for, and its redemption history — independent of whether this guest
+    is also a ticket-allotment holder, since a referrer might just be
+    referring, not distributing tickets at all.
+    """
+    codes = db.query(PromoCode).filter(PromoCode.guest_id == guest_id).all()
+    if not codes:
+        return None
+
+    result = []
+    for code in codes:
+        points_available = (
+            redemptions_service.points_available(db, code.id) if code.reward_type == RewardType.POINTS else None
+        )
+        _, tiers = redemptions_service.eligible_tiers(db, event_id, code.id)
+        redemptions = (
+            db.query(RewardRedemption)
+            .filter(RewardRedemption.promo_code_id == code.id)
+            .order_by(RewardRedemption.redeemed_at.desc())
+            .all()
+        )
+        result.append(
+            ReferralCodeInfo(
+                promo_code_id=str(code.id),
+                code=code.code,
+                reward_type=code.reward_type.value,
+                points_available=points_available,
+                eligible_tiers=[
+                    EligibleTier(
+                        redemption_tier_id=str(t["tier"].id),
+                        points_required=t["tier"].points_required,
+                        label=t["tier"].label,
+                        cash_value=float(t["option"].cash_value) if t["option"].cash_value is not None else None,
+                        ticket_value=t["option"].ticket_value,
+                        affordable=t["affordable"],
+                    )
+                    for t in tiers
+                ],
+                redemption_history=[
+                    RedemptionHistoryItem(
+                        choice=r.choice.value,
+                        points_spent=r.points_spent,
+                        cash_value=float(r.cash_value) if r.cash_value is not None else None,
+                        ticket_value=r.ticket_value,
+                        payout_status=r.payout_status.value if r.payout_status else None,
+                        redeemed_at=r.redeemed_at.isoformat(),
+                    )
+                    for r in redemptions
+                ],
+            )
+        )
+    return result
 
 
 @router.get("/public/rsvp/{token}", response_model=RSVPInfoResponse)
@@ -40,6 +104,7 @@ def get_rsvp_info(token: str, db: Session = Depends(get_db)):
             visit_date=guest.visit_date,
             party_size=guest.party_size,
             is_allotment_holder=False,
+            referral_codes=_build_referral_codes(db, str(guest.event_id), str(guest.id)),
         )
 
     children = db.query(Guest).filter(Guest.allocated_by_guest_id == guest.id).all()
@@ -76,6 +141,7 @@ def get_rsvp_info(token: str, db: Session = Depends(get_db)):
             )
             for c in children
         ],
+        referral_codes=_build_referral_codes(db, str(guest.event_id), str(guest.id)),
     )
 
 
@@ -163,4 +229,24 @@ def distribute_tickets(token: str, payload: RSVPDistributeRequest, db: Session =
         )
 
     db.commit()
+    return get_rsvp_info(token, db)
+
+
+@router.post("/public/rsvp/{token}/redeem", response_model=RSVPInfoResponse)
+def redeem_reward(token: str, payload: RSVPRedeemRequest, db: Session = Depends(get_db)):
+    """
+    A referrer claiming a reward at a redemption tier for one of their
+    own promo codes. Verifies the code actually belongs to this guest
+    before touching anything — without that check, a crafted request
+    could redeem against a code that isn't the caller's own.
+    """
+    guest = _get_guest_by_token_or_404(db, token)
+
+    code = db.query(PromoCode).filter(PromoCode.id == payload.promo_code_id).first()
+    if not code or str(code.guest_id) != str(guest.id):
+        raise HTTPException(status_code=404, detail="That promo code isn't associated with this link.")
+
+    redemptions_service.redeem(
+        db, str(guest.event_id), payload.promo_code_id, payload.redemption_tier_id, payload.choice
+    )
     return get_rsvp_info(token, db)

@@ -66,6 +66,9 @@ class PromoCodeResponse(BaseModel):
     # so summing is always unit-consistent.
     sale_count: int = 0
     total_reward: Optional[Decimal] = None
+    # Only meaningful for a points-type code — points_earned minus points
+    # already spent on redemptions. None for any other reward_type.
+    points_available: Optional[int] = None
 
     class Config:
         from_attributes = True
@@ -107,3 +110,61 @@ class SalesImportResult(BaseModel):
     imported: int
     skipped_duplicates: int
     unmatched_code_count: int
+
+
+class RedemptionTierCreateRequest(BaseModel):
+    points_required: int = Field(ge=1)
+    label: Optional[str] = None
+
+
+class RedemptionTierResponse(BaseModel):
+    id: uuid.UUID
+    event_id: uuid.UUID
+    points_required: int
+    label: Optional[str] = None
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class RedemptionOptionUpsertRequest(BaseModel):
+    cash_value: Optional[Decimal] = Field(default=None, ge=0)
+    ticket_value: Optional[int] = Field(default=None, ge=1)
+
+
+class RedemptionOptionResponse(BaseModel):
+    id: uuid.UUID
+    promo_code_id: uuid.UUID
+    redemption_tier_id: uuid.UUID
+    cash_value: Optional[Decimal] = None
+    ticket_value: Optional[int] = None
+    tier_points_required: int
+    tier_label: Optional[str] = None
+
+    class Config:
+        from_attributes = True
+
+
+class RewardRedemptionResponse(BaseModel):
+    id: uuid.UUID
+    promo_code_id: uuid.UUID
+    redemption_tier_id: uuid.UUID
+    choice: str
+    points_spent: int
+    cash_value: Optional[Decimal] = None
+    ticket_value: Optional[int] = None
+    created_guest_id: Optional[uuid.UUID] = None
+    payout_status: Optional[str] = None
+    redeemed_at: datetime
+    promo_code: Optional[str] = None
+    referrer_name: Optional[str] = None
+
+    class Config:
+        from_attributes = True
+
+
+class RedeemRequest(BaseModel):
+    promo_code_id: uuid.UUID
+    redemption_tier_id: uuid.UUID
+    choice: Literal["cash", "ticket"]
