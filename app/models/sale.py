@@ -1,7 +1,7 @@
 import enum
 import uuid
 
-from sqlalchemy import Column, DateTime, Enum as SAEnum, ForeignKey, Numeric, String
+from sqlalchemy import Column, DateTime, Enum as SAEnum, ForeignKey, Integer, Numeric, String
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.sql import func
 
@@ -42,7 +42,12 @@ class Sale(Base):
     buyer_email = Column(String, nullable=True)
     amount = Column(Numeric, nullable=True)  # needed to compute a PERCENTAGE reward; optional otherwise
     ticket_type = Column(String, nullable=True)  # free text, matched (case-insensitively) against a POINTS
-    # code's per-ticket-type earning rates — see PromoCodePointsRate
+    # code's per-ticket-type earning rates — see PromoCodePointsRate — and
+    # also against seating category names for the Seating Summary view
+    quantity = Column(Integer, nullable=False, default=1)  # a single box-office transaction can cover
+    # multiple tickets at once (a bulk purchase) — this is what a POINTS
+    # reward multiplies by, so a 50-ticket sale correctly earns 50x the
+    # per-ticket rate rather than being undercounted as one ticket
     sale_date = Column(String, nullable=True)  # ISO date string, consistent with Guest.visit_date elsewhere
     external_transaction_id = Column(String, nullable=True, index=True)
 

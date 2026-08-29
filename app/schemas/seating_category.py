@@ -37,3 +37,25 @@ class SeatingCategoryResponse(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+class SeatingSummaryRow(BaseModel):
+    """
+    One category's live reconciliation across capacity, guest list, and
+    box office sales — capacity, box_office, and allotted/committed are
+    each their own real number, not derived from each other, so the two
+    availability figures can genuinely disagree (that's the point):
+    confirmed_avail is capacity minus what's actually locked in (mirrors
+    what the real seating-capacity check enforces); estimated_avail is
+    the more conservative number, also subtracting tentative holds and
+    box-office sales, giving a "worst case" available count.
+    """
+
+    category_id: uuid.UUID
+    category_name: str
+    capacity: int
+    box_office: int
+    allotted: int
+    committed: int
+    confirmed_avail: int
+    estimated_avail: int

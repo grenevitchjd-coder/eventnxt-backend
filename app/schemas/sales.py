@@ -84,6 +84,7 @@ class SaleResponse(BaseModel):
     buyer_email: Optional[str] = None
     amount: Optional[Decimal] = None
     ticket_type: Optional[str] = None
+    quantity: int = 1
     sale_date: Optional[str] = None
     external_transaction_id: Optional[str] = None
     source: str
@@ -99,6 +100,7 @@ class SalesImportRow(BaseModel):
     buyer_email: Optional[str] = None
     amount: Optional[Decimal] = None
     ticket_type: Optional[str] = None
+    quantity: int = Field(default=1, ge=1)
     promo_code: Optional[str] = None
     sale_date: Optional[str] = None
     external_transaction_id: Optional[str] = None

@@ -279,6 +279,7 @@ def import_sales(
                 "buyer_email": row.buyer_email,
                 "amount": row.amount,
                 "ticket_type": row.ticket_type,
+                "quantity": row.quantity,
                 "promo_code": row.promo_code,
                 "sale_date": row.sale_date,
                 "external_transaction_id": row.external_transaction_id,

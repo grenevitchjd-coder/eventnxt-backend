@@ -1,14 +1,17 @@
 from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app.models.guest import Guest, GuestAllocationStatus
 from app.models.guest_type_seating_priority import GuestTypeSeatingPriority
+from app.models.sale import Sale
 from app.models.seating_category import SeatingCategory
 from app.schemas.seating_category import (
     SeatingCategoryCreateRequest,
     SeatingCategoryUpdateRequest,
     SeatingCategoryResponse,
+    SeatingSummaryRow,
 )
 from app.services.deps import CurrentUser
 from app.services.event_access import require_event_access
@@ -57,18 +60,19 @@ def update_seating_category(
         raise HTTPException(status_code=404, detail="Seating category not found.")
 
     if payload.capacity < category.capacity:
-        confirmed_count = (
-            db.query(Guest)
+        confirmed_seats = (
+            db.query(func.coalesce(func.sum(Guest.party_size), 0))
             .filter(
                 Guest.seating_category_id == category.id,
                 Guest.allocation_status == GuestAllocationStatus.CONFIRMED,
             )
-            .count()
+            .scalar()
+            or 0
         )
-        if payload.capacity < confirmed_count:
+        if payload.capacity < confirmed_seats:
             raise HTTPException(
                 status_code=400,
-                detail=f"Can't set capacity below {confirmed_count} — that many guests are already "
+                detail=f"Can't set capacity below {confirmed_seats} — that many seats are already "
                 f"confirmed in this category.",
             )
 
@@ -105,3 +109,59 @@ def delete_seating_category(
 
     db.delete(category)
     db.commit()
+
+
+@router.get("/summary", response_model=list[SeatingSummaryRow])
+def get_seating_summary(
+    event_id: str,
+    db: Session = Depends(get_db),
+    user: CurrentUser = Depends(require_event_access),
+):
+    """
+    One row per seating category, reconciling capacity against the guest
+    list and box office sales in a single view — capacity, box_office,
+    allotted, and committed are each queried independently and never
+    double-counted against each other, since Sale records and Guest
+    records are entirely separate data sources with no overlap today.
+    """
+    categories = db.query(SeatingCategory).filter(SeatingCategory.event_id == event_id).all()
+
+    rows = []
+    for category in categories:
+        box_office = (
+            db.query(func.coalesce(func.sum(Sale.quantity), 0))
+            .filter(Sale.event_id == event_id, Sale.ticket_type.ilike(category.name))
+            .scalar()
+            or 0
+        )
+        allotted = (
+            db.query(func.coalesce(func.sum(Guest.party_size), 0))
+            .filter(
+                Guest.seating_category_id == category.id,
+                Guest.allocation_status.in_([GuestAllocationStatus.PENDING, GuestAllocationStatus.CONFIRMED]),
+            )
+            .scalar()
+            or 0
+        )
+        committed = (
+            db.query(func.coalesce(func.sum(Guest.party_size), 0))
+            .filter(
+                Guest.seating_category_id == category.id,
+                Guest.allocation_status == GuestAllocationStatus.CONFIRMED,
+            )
+            .scalar()
+            or 0
+        )
+        rows.append(
+            SeatingSummaryRow(
+                category_id=category.id,
+                category_name=category.name,
+                capacity=category.capacity,
+                box_office=box_office,
+                allotted=allotted,
+                committed=committed,
+                confirmed_avail=max(category.capacity - committed, 0),
+                estimated_avail=max(category.capacity - allotted - box_office, 0),
+            )
+        )
+    return rows

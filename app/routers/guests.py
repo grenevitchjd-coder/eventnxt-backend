@@ -43,6 +43,8 @@ def _serialize_guest(db: Session, guest: Guest) -> GuestResponse:
         seating_category_id=guest.seating_category_id,
         allocation_status=guest.allocation_status.value,
         party_size=guest.party_size,
+        perks=guest.perks,
+        comments=guest.comments,
         ticket_allotment_overridden=guest.ticket_allotment_overridden,
         ticket_allotment=[TicketAllotmentDayItem(date=r.date, quantity=r.quantity) for r in rows],
         allotment_total=allotment_total,
@@ -119,6 +121,8 @@ def create_guest(
         allocation_status=GuestAllocationStatus(payload.allocation_status),
         party_size=payload.party_size,
         visit_date=payload.visit_date,
+        perks=payload.perks,
+        comments=payload.comments,
         ticket_allotment_overridden=payload.ticket_allotment is not None,
         rsvp_token=secrets.token_urlsafe(24),
     )
@@ -192,6 +196,8 @@ def update_guest(
     guest.allocation_status = GuestAllocationStatus(payload.allocation_status)
     guest.party_size = payload.party_size
     guest.visit_date = payload.visit_date
+    guest.perks = payload.perks
+    guest.comments = payload.comments
 
     if payload.ticket_allotment is not None:
         guest.ticket_allotment_overridden = True

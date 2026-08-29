@@ -65,7 +65,9 @@ def points_for_ticket_type(db: Session, promo_code_id: str, ticket_type: Optiona
     return rate.points if rate else 0
 
 
-def compute_reward(db: Session, promo_code: PromoCode, amount: Optional[Decimal], ticket_type: Optional[str]) -> Optional[Decimal]:
+def compute_reward(
+    db: Session, promo_code: PromoCode, amount: Optional[Decimal], ticket_type: Optional[str], quantity: int = 1
+) -> Optional[Decimal]:
     """
     The reward owed for one sale attributed to `promo_code`. Returns None
     when it genuinely can't be computed (a percentage reward with no
@@ -74,32 +76,36 @@ def compute_reward(db: Session, promo_code: PromoCode, amount: Optional[Decimal]
     manual follow-up). POINTS rewards, by contrast, correctly return 0
     (not None) for an unconfigured ticket type — see
     points_for_ticket_type for why that's a different situation.
+
+    `quantity` is how many tickets this one sale row actually covers (a
+    bulk box-office transaction can be more than one). FLAT_AMOUNT,
+    FREE_TICKETS, and POINTS are all "per ticket" rewards, so they scale
+    with quantity — a 50-ticket sale at $10 flat correctly earns $500,
+    not $10. PERCENTAGE does NOT get multiplied here: `amount` already
+    represents the sale's full dollar value (50 tickets' worth), so
+    multiplying by quantity on top of that would double-count.
     """
     if promo_code.reward_type == RewardType.FLAT_AMOUNT:
-        return promo_code.reward_value
+        return promo_code.reward_value * quantity
     if promo_code.reward_type == RewardType.PERCENTAGE:
         if amount is None:
             return None
         return amount * (promo_code.reward_value / Decimal(100))
     if promo_code.reward_type == RewardType.FREE_TICKETS:
-        # Not a dollar figure — a ticket count owed. Returned as-is; it's
-        # on the reward-terms' reward_type for the caller to interpret
-        # correctly, same as amount vs. count is handled anywhere else
-        # reward_value is read.
-        return promo_code.reward_value
+        return promo_code.reward_value * quantity
     if promo_code.reward_type == RewardType.POINTS:
-        return Decimal(points_for_ticket_type(db, promo_code.id, ticket_type))
+        return Decimal(points_for_ticket_type(db, promo_code.id, ticket_type)) * quantity
     return None
 
 
 def reconcile_sale_row(db: Session, event_id: str, row: dict) -> Sale:
     """
     Turns one normalized sales row (buyer_name, buyer_email, amount,
-    ticket_type, promo_code (the code string, not the id), sale_date,
-    external_transaction_id) into a Sale record, matching the code
-    against this event's PromoCodes (case-insensitive) and computing the
-    reward at import time. Does NOT commit — caller controls the
-    transaction so a whole batch can be committed together.
+    ticket_type, quantity, promo_code (the code string, not the id),
+    sale_date, external_transaction_id) into a Sale record, matching the
+    code against this event's PromoCodes (case-insensitive) and
+    computing the reward at import time. Does NOT commit — caller
+    controls the transaction so a whole batch can be committed together.
     """
     promo_code = None
     code_text = (row.get("promo_code") or "").strip()
@@ -112,7 +118,8 @@ def reconcile_sale_row(db: Session, event_id: str, row: dict) -> Sale:
 
     amount = row.get("amount")
     ticket_type = row.get("ticket_type")
-    reward = compute_reward(db, promo_code, amount, ticket_type) if promo_code else None
+    quantity = row.get("quantity") or 1
+    reward = compute_reward(db, promo_code, amount, ticket_type, quantity) if promo_code else None
 
     sale = Sale(
         event_id=event_id,
@@ -121,6 +128,7 @@ def reconcile_sale_row(db: Session, event_id: str, row: dict) -> Sale:
         buyer_email=row.get("buyer_email"),
         amount=amount,
         ticket_type=ticket_type,
+        quantity=quantity,
         sale_date=row.get("sale_date"),
         external_transaction_id=row.get("external_transaction_id") or None,
         source=SaleSource.CSV_UPLOAD,

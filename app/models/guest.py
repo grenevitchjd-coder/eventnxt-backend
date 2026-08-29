@@ -1,7 +1,7 @@
 import enum
 import uuid
 
-from sqlalchemy import Boolean, Column, String, DateTime, Enum as SAEnum, ForeignKey, Integer
+from sqlalchemy import Boolean, Column, String, DateTime, Enum as SAEnum, ForeignKey, Integer, Text
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
@@ -93,6 +93,13 @@ class Guest(Base):
     # means "not sent." Doubles as a boolean via the null check while
     # also recording when, for follow-up purposes.
     link_sent_at = Column(DateTime(timezone=True), nullable=True)
+
+    # Free-text extras an organizer might track per guest — comp items
+    # beyond the ticket itself (drinks, a gift bag) and general notes.
+    # Deliberately plain strings, not structured data — these are for
+    # human reading, not computation.
+    perks = Column(String, nullable=True)
+    comments = Column(Text, nullable=True)
 
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 

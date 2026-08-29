@@ -18,10 +18,8 @@ class GuestCreateRequest(BaseModel):
     allocation_status: Literal["confirmed", "pending", "declined"] = "confirmed"
     party_size: int = Field(default=1, ge=1)
     visit_date: Optional[str] = None
-    # Per-guest override of the guest type's default ticket allotment.
-    # Omit entirely to inherit the type's default. Provide a list
-    # (including an empty one, to mean "explicitly nothing to give out")
-    # to override it — see Guest.ticket_allotment_overridden.
+    perks: Optional[str] = None
+    comments: Optional[str] = None
     ticket_allotment: Optional[List[TicketAllotmentDayItem]] = None
 
 
@@ -33,6 +31,8 @@ class GuestUpdateRequest(BaseModel):
     allocation_status: Literal["confirmed", "pending", "declined"] = "confirmed"
     party_size: int = Field(default=1, ge=1)
     visit_date: Optional[str] = None
+    perks: Optional[str] = None
+    comments: Optional[str] = None
     ticket_allotment: Optional[List[TicketAllotmentDayItem]] = None
 
 
@@ -45,10 +45,10 @@ class GuestResponse(BaseModel):
     seating_category_id: Optional[uuid.UUID] = None
     allocation_status: str
     party_size: int
+    perks: Optional[str] = None
+    comments: Optional[str] = None
     ticket_allotment_overridden: bool
     ticket_allotment: List[TicketAllotmentDayItem] = []
-    # Aggregate across all days — "12 of 20 given out" at a glance in the
-    # organizer's guest list. Both 0 for a guest with no allotment at all.
     allotment_total: int = 0
     allotment_distributed: int = 0
     visit_date: Optional[str] = None

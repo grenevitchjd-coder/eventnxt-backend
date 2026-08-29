@@ -94,7 +94,13 @@ def check_and_award_bonuses(db: Session, event_id: str, promo_code_id: str) -> l
     if not tiers:
         return []
 
-    sale_count = db.query(func.count(Sale.id)).filter(Sale.promo_code_id == promo_code_id).scalar() or 0
+    # SUM(quantity), not row count — a single bulk transaction can cover
+    # many tickets at once, and "sell 20 tickets" needs to mean 20
+    # tickets, not 20 separate transactions.
+    sale_count = (
+        db.query(func.coalesce(func.sum(Sale.quantity), 0)).filter(Sale.promo_code_id == promo_code_id).scalar()
+        or 0
+    )
 
     already_awarded_thresholds = {
         row[0]
