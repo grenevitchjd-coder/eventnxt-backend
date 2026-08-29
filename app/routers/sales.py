@@ -5,7 +5,10 @@ from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app.models.guest import Guest
+from app.models.bonus_award import BonusAward
+from app.models.event_bonus_tier import EventBonusTier
 from app.models.promo_code import PromoCode, RewardType
+from app.models.promo_code_bonus_tier import PromoCodeBonusTier
 from app.models.promo_code_points_rate import PromoCodePointsRate
 from app.models.promo_code_redemption_option import PromoCodeRedemptionOption
 from app.models.redemption_tier import RedemptionTier
@@ -13,7 +16,13 @@ from app.models.reward_redemption import PayoutStatus, RewardRedemption
 from app.models.sale import Sale
 from app.models.sales_config import SalesConfig, SalesPlatform
 from app.schemas.sales import (
+    BonusAwardItem,
+    BonusTierCreateRequest,
+    BonusTierItem,
+    BonusTierResponse,
     PointsRateItem,
+    PromoCodeBonusTiersRequest,
+    PromoCodeBonusTiersResponse,
     PromoCodeCreateRequest,
     PromoCodeResponse,
     PromoCodeUpdateRequest,
@@ -28,6 +37,7 @@ from app.schemas.sales import (
     SalesImportRequest,
     SalesImportResult,
 )
+from app.services import bonuses as bonuses_service
 from app.services import redemptions as redemptions_service
 from app.services import sales as sales_service
 from app.services.deps import CurrentUser
@@ -44,6 +54,9 @@ def _serialize_promo_code(db: Session, code: PromoCode) -> PromoCodeResponse:
     points_available = (
         redemptions_service.points_available(db, code.id) if code.reward_type == RewardType.POINTS else None
     )
+    award_rows = (
+        db.query(BonusAward).filter(BonusAward.promo_code_id == code.id).order_by(BonusAward.awarded_at).all()
+    )
     return PromoCodeResponse(
         id=code.id,
         event_id=code.event_id,
@@ -57,6 +70,11 @@ def _serialize_promo_code(db: Session, code: PromoCode) -> PromoCodeResponse:
         sale_count=len(code_sales),
         total_reward=total_reward,
         points_available=points_available,
+        bonus_awards=[
+            BonusAwardItem(tickets_required=a.tickets_required, bonus_value=a.bonus_value, awarded_at=a.awarded_at)
+            for a in award_rows
+        ],
+        bonus_tiers_overridden=code.bonus_tiers_overridden,
     )
 
 
@@ -213,6 +231,7 @@ def delete_promo_code(
             detail=f"Can't delete — {sale_count} sale(s) are already attributed to this code.",
         )
     db.query(PromoCodePointsRate).filter(PromoCodePointsRate.promo_code_id == code_id).delete()
+    db.query(PromoCodeBonusTier).filter(PromoCodeBonusTier.promo_code_id == code_id).delete()
     db.delete(code)
     db.commit()
 
@@ -246,6 +265,7 @@ def import_sales(
     imported = 0
     skipped_duplicates = 0
     unmatched_code_count = 0
+    affected_code_ids = set()
 
     for row in payload.rows:
         if row.external_transaction_id and row.external_transaction_id in already_seen:
@@ -266,7 +286,16 @@ def import_sales(
         )
         if row.promo_code and sale.promo_code_id is None:
             unmatched_code_count += 1
+        if sale.promo_code_id is not None:
+            affected_code_ids.add(str(sale.promo_code_id))
         imported += 1
+
+    # Volume bonus tiers are checked once per code that received new
+    # sales in this batch, not per row — a threshold is about the
+    # cumulative count, so it only needs evaluating after all of this
+    # batch's sales for that code are in.
+    for code_id in affected_code_ids:
+        bonuses_service.check_and_award_bonuses(db, event_id, code_id)
 
     db.commit()
     return SalesImportResult(
@@ -499,4 +528,121 @@ def mark_redemption_paid(
         redeemed_at=redemption.redeemed_at,
         promo_code=code.code,
         referrer_name=guest.name,
+    )
+
+
+# ---------- Event-wide default bonus tiers ----------
+
+
+@router.post("/bonus-tiers", response_model=BonusTierResponse, status_code=201)
+def create_bonus_tier(
+    event_id: str,
+    payload: BonusTierCreateRequest,
+    db: Session = Depends(get_db),
+    user: CurrentUser = Depends(require_event_access),
+):
+    """
+    The organizer's default volume-bonus structure — applies to every
+    code that hasn't overridden it. Freely editable/deletable after
+    creation, unlike redemption tiers: BonusAward snapshots its own
+    tickets_required/bonus_value at award time rather than referencing
+    this row, so changing or removing a tier here never rewrites a bonus
+    that's already been given.
+    """
+    tier = EventBonusTier(event_id=event_id, tickets_required=payload.tickets_required, bonus_value=payload.bonus_value)
+    db.add(tier)
+    db.commit()
+    db.refresh(tier)
+    return tier
+
+
+@router.get("/bonus-tiers", response_model=list[BonusTierResponse])
+def list_bonus_tiers(
+    event_id: str, db: Session = Depends(get_db), user: CurrentUser = Depends(require_event_access)
+):
+    return (
+        db.query(EventBonusTier)
+        .filter(EventBonusTier.event_id == event_id)
+        .order_by(EventBonusTier.tickets_required)
+        .all()
+    )
+
+
+@router.delete("/bonus-tiers/{tier_id}", status_code=204)
+def delete_bonus_tier(
+    event_id: str,
+    tier_id: str,
+    db: Session = Depends(get_db),
+    user: CurrentUser = Depends(require_event_access),
+):
+    tier = db.query(EventBonusTier).filter(EventBonusTier.id == tier_id, EventBonusTier.event_id == event_id).first()
+    if not tier:
+        raise HTTPException(status_code=404, detail="Bonus tier not found.")
+    db.delete(tier)
+    db.commit()
+
+
+# ---------- Per-code bonus tier override ----------
+
+
+@router.get("/promo-codes/{code_id}/bonus-tiers", response_model=PromoCodeBonusTiersResponse)
+def get_promo_code_bonus_tiers(
+    event_id: str,
+    code_id: str,
+    db: Session = Depends(get_db),
+    user: CurrentUser = Depends(require_event_access),
+):
+    code = db.query(PromoCode).filter(PromoCode.id == code_id, PromoCode.event_id == event_id).first()
+    if not code:
+        raise HTTPException(status_code=404, detail="Promo code not found.")
+    tiers = bonuses_service.effective_bonus_tiers(db, event_id, code)
+    return PromoCodeBonusTiersResponse(
+        overridden=code.bonus_tiers_overridden,
+        tiers=[BonusTierItem(tickets_required=t.tickets_required, bonus_value=t.bonus_value) for t in tiers],
+    )
+
+
+@router.put("/promo-codes/{code_id}/bonus-tiers", response_model=PromoCodeBonusTiersResponse)
+def set_promo_code_bonus_tiers(
+    event_id: str,
+    code_id: str,
+    payload: PromoCodeBonusTiersRequest,
+    db: Session = Depends(get_db),
+    user: CurrentUser = Depends(require_event_access),
+):
+    """Sets this code's OWN bonus tiers, overriding the event default
+    entirely — including submitting an empty list, which means "no
+    bonuses for this code," distinct from inheriting the default."""
+    code = db.query(PromoCode).filter(PromoCode.id == code_id, PromoCode.event_id == event_id).first()
+    if not code:
+        raise HTTPException(status_code=404, detail="Promo code not found.")
+    code.bonus_tiers_overridden = True
+    bonuses_service.replace_promo_code_bonus_tiers(db, code_id, payload.tiers)
+    db.commit()
+    tiers = bonuses_service.effective_bonus_tiers(db, event_id, code)
+    return PromoCodeBonusTiersResponse(
+        overridden=True,
+        tiers=[BonusTierItem(tickets_required=t.tickets_required, bonus_value=t.bonus_value) for t in tiers],
+    )
+
+
+@router.delete("/promo-codes/{code_id}/bonus-tiers", response_model=PromoCodeBonusTiersResponse)
+def clear_promo_code_bonus_tiers(
+    event_id: str,
+    code_id: str,
+    db: Session = Depends(get_db),
+    user: CurrentUser = Depends(require_event_access),
+):
+    """Clears this code's override, reverting it back to inheriting the
+    event's default bonus tiers."""
+    code = db.query(PromoCode).filter(PromoCode.id == code_id, PromoCode.event_id == event_id).first()
+    if not code:
+        raise HTTPException(status_code=404, detail="Promo code not found.")
+    code.bonus_tiers_overridden = False
+    db.query(PromoCodeBonusTier).filter(PromoCodeBonusTier.promo_code_id == code_id).delete()
+    db.commit()
+    tiers = bonuses_service.effective_bonus_tiers(db, event_id, code)
+    return PromoCodeBonusTiersResponse(
+        overridden=False,
+        tiers=[BonusTierItem(tickets_required=t.tickets_required, bonus_value=t.bonus_value) for t in tiers],
     )

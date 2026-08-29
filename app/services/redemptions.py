@@ -4,6 +4,7 @@ from fastapi import HTTPException
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
+from app.models.bonus_award import BonusAward
 from app.models.guest import Guest, GuestAllocationStatus
 from app.models.promo_code import PromoCode
 from app.models.promo_code_redemption_option import PromoCodeRedemptionOption
@@ -14,16 +15,25 @@ from app.services import seating
 
 
 def points_earned(db: Session, promo_code_id: str) -> int:
-    """Total points a points-type code has earned across all its
-    attributed sales — the same aggregate as PromoCodeResponse.total_reward,
-    just fetched directly here rather than through the full serializer."""
-    total = (
+    """Total points a points-type code has earned — from attributed
+    sales (the same aggregate as PromoCodeResponse.total_reward) PLUS
+    any volume bonuses already awarded, since a bonus on a points-type
+    code is itself denominated in points (see app/services/bonuses.py)
+    and should count toward what's redeemable, same as sale-earned
+    points."""
+    from_sales = (
         db.query(func.coalesce(func.sum(Sale.computed_reward), 0))
         .filter(Sale.promo_code_id == promo_code_id)
         .scalar()
         or 0
     )
-    return int(total)
+    from_bonuses = (
+        db.query(func.coalesce(func.sum(BonusAward.bonus_value), 0))
+        .filter(BonusAward.promo_code_id == promo_code_id)
+        .scalar()
+        or 0
+    )
+    return int(from_sales + from_bonuses)
 
 
 def points_redeemed(db: Session, promo_code_id: str) -> int:

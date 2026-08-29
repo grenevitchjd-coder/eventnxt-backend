@@ -69,6 +69,8 @@ class PromoCodeResponse(BaseModel):
     # Only meaningful for a points-type code — points_earned minus points
     # already spent on redemptions. None for any other reward_type.
     points_available: Optional[int] = None
+    bonus_awards: List["BonusAwardItem"] = []
+    bonus_tiers_overridden: bool = False
 
     class Config:
         from_attributes = True
@@ -168,3 +170,43 @@ class RedeemRequest(BaseModel):
     promo_code_id: uuid.UUID
     redemption_tier_id: uuid.UUID
     choice: Literal["cash", "ticket"]
+
+
+
+class BonusTierItem(BaseModel):
+    tickets_required: int = Field(ge=1)
+    bonus_value: Decimal = Field(ge=0)
+
+
+class BonusTierCreateRequest(BaseModel):
+    tickets_required: int = Field(ge=1)
+    bonus_value: Decimal = Field(ge=0)
+
+
+class BonusTierResponse(BaseModel):
+    id: uuid.UUID
+    event_id: uuid.UUID
+    tickets_required: int
+    bonus_value: Decimal
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class PromoCodeBonusTiersRequest(BaseModel):
+    tiers: List[BonusTierItem]
+
+
+class PromoCodeBonusTiersResponse(BaseModel):
+    overridden: bool
+    tiers: List[BonusTierItem]
+
+
+class BonusAwardItem(BaseModel):
+    tickets_required: int
+    bonus_value: Decimal
+    awarded_at: datetime
+
+
+PromoCodeResponse.model_rebuild()

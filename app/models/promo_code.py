@@ -1,7 +1,7 @@
 import enum
 import uuid
 
-from sqlalchemy import Column, DateTime, Enum as SAEnum, ForeignKey, Numeric, String, Text
+from sqlalchemy import Boolean, Column, DateTime, Enum as SAEnum, ForeignKey, Numeric, String, Text
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.sql import func
 
@@ -31,6 +31,12 @@ class PromoCode(Base):
     reward_value — that's enforced at the API layer, not the schema,
     since which fields are required depends on reward_type.
 
+    bonus_tiers_overridden works the same way as
+    Guest.ticket_allotment_overridden — True means use this code's own
+    PromoCodeBonusTier rows (even zero of them, meaning "no bonuses for
+    this code"), False means inherit the event's EventBonusTier default
+    entirely.
+
     referral_message_draft stores the "here's what to send your friends"
     text an organizer drafts for the referrer — captured even though
     there's no automated email to send it yet, so it's not lost once
@@ -51,5 +57,6 @@ class PromoCode(Base):
         SAEnum(RewardType, name="reward_type", values_callable=lambda e: [x.value for x in e]), nullable=False
     )
     reward_value = Column(Numeric, nullable=True)
+    bonus_tiers_overridden = Column(Boolean, nullable=False, default=False)
     referral_message_draft = Column(Text, nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
