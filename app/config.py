@@ -30,6 +30,16 @@ class Settings(BaseSettings):
     r2_bucket_name: str = ""
     r2_public_url_base: str = ""  # e.g. https://pub-xxxx.r2.dev or a custom domain
 
+    # Email (generic SMTP — provider-agnostic on purpose). Any provider's
+    # SMTP relay works: Resend, SendGrid, SES, Postmark, etc. Switching
+    # providers is a config-var change, never a code change. Port 587 with
+    # STARTTLS is the default because Heroku blocks port 25.
+    smtp_host: str = ""
+    smtp_port: int = 587
+    smtp_user: str = ""
+    smtp_password: str = ""
+    mail_from: str = ""  # e.g. tickets@events360.app — must be a verified sender at the provider
+
     class Config:
         env_file = ".env"
 
