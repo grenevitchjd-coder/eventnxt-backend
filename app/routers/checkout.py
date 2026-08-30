@@ -22,6 +22,7 @@ from app.database import get_db
 from app.models.event_profile import EventProfile
 from app.models.order import Order, OrderStatus
 from app.models.order_item import OrderItem
+from app.models.promo_code import PromoCode
 from app.models.stripe_webhook_event import StripeWebhookEvent
 from app.models.ticket import Ticket
 from app.models.ticket_type import TicketType
@@ -34,6 +35,7 @@ from app.schemas.ticketing import (
     PublicTicketTypeResponse,
 )
 from app.services import ticketing
+from app.services.native_sales import record_native_sales
 from app.services.stripe_gateway import WebhookNotConfigured, construct_webhook_event, create_checkout_session
 
 router = APIRouter(tags=["checkout"])
@@ -84,6 +86,19 @@ def list_public_ticket_types(slug: str, db: Session = Depends(get_db)):
 def start_checkout(slug: str, payload: CheckoutRequest, db: Session = Depends(get_db)):
     profile = _published_profile_or_404(db, slug)
 
+    # Promo code: resolve before anything else — a bad code should fail
+    # fast, before inventory is held or payment started.
+    promo_code = None
+    code_text = (payload.promo_code or "").strip()
+    if code_text:
+        promo_code = (
+            db.query(PromoCode)
+            .filter(PromoCode.event_id == profile.event_id, PromoCode.code.ilike(code_text))
+            .first()
+        )
+        if not promo_code:
+            raise HTTPException(status_code=400, detail="That promo code isn't recognized for this event.")
+
     try:
         order = ticketing.create_pending_order(
             db,
@@ -96,12 +111,17 @@ def start_checkout(slug: str, payload: CheckoutRequest, db: Session = Depends(ge
         db.rollback()
         raise HTTPException(status_code=400, detail=str(exc))
 
+    if promo_code:
+        order.promo_code_id = promo_code.id
+
     order_url = f"{settings.eventnxt_frontend_url}/e/{slug}/order/{order.order_token}"
 
     # $0 order (comps, free RSVP-style types): no Stripe, no fee — paid
-    # instantly, tickets minted now, email fired best-effort.
+    # instantly, tickets minted now, sales recorded, email fired
+    # best-effort.
     if order.subtotal_cents == 0:
         tickets = ticketing.fulfill_paid_order(db, order)
+        record_native_sales(db, order)
         db.commit()
         ticketing.send_order_confirmation_email(order, tickets, profile.title, order_url)
         return CheckoutResponse(
@@ -213,6 +233,7 @@ async def stripe_webhook(request: Request, db: Session = Depends(get_db)):
         if order and order.status == OrderStatus.PENDING:
             order.stripe_payment_intent_id = session.get("payment_intent")
             tickets = ticketing.fulfill_paid_order(db, order)
+            record_native_sales(db, order)  # feeds the referral machine — same transaction as the paid order
             profile = db.query(EventProfile).filter(EventProfile.event_id == order.event_id).first()
             db.commit()  # the paid order is sacred — committed BEFORE any email attempt
             if profile:

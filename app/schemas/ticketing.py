@@ -72,6 +72,11 @@ class CheckoutRequest(BaseModel):
     buyer_name: str
     buyer_email: EmailStr
     items: list[CheckoutItemRequest] = Field(min_length=1)
+    # Optional referral/promo code — validated BEFORE any payment starts,
+    # so attribution is known at purchase (unlike CSV imports, which match
+    # after the fact). An unrecognized code is a 400, not a silent skip:
+    # an interactive buyer deserves the chance to fix a typo.
+    promo_code: Optional[str] = None
 
 
 class CheckoutResponse(BaseModel):
