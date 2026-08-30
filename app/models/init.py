@@ -18,3 +18,8 @@ from app.models.event_profile import EventProfile  # noqa: F401
 from app.models.event_profile_link import EventProfileLink, LinkKind  # noqa: F401
 from app.models.event_profile_schedule_item import EventProfileScheduleItem  # noqa: F401
 from app.models.event_profile_photo import EventProfilePhoto, MAX_GALLERY_PHOTOS  # noqa: F401
+from app.models.ticket_type import TicketType  # noqa: F401
+from app.models.order import Order, OrderStatus  # noqa: F401
+from app.models.order_item import OrderItem  # noqa: F401
+from app.models.ticket import Ticket, TicketStatus  # noqa: F401
+from app.models.stripe_webhook_event import StripeWebhookEvent  # noqa: F401

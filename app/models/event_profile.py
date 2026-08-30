@@ -41,6 +41,18 @@ class EventProfile(Base):
     banner_focus = Column(String, nullable=True)  # which part of the banner survives the crop: null/center | top | bottom
     about_us = Column(Text, nullable=True)  # optional "About Us" section near the bottom of the page
 
+    # ---- Ticketing-adjacent public content ----
+    # refund_policy: shown at checkout, in the organizer's own words —
+    # what's displayed at purchase is what protects them in a dispute.
+    # venue_map_url: an uploaded image of the venue/seating map (same
+    # storage pipeline as banner/logo) — the honest v1 of "help buyers
+    # see what they're buying"; the interactive map replaces it someday.
+    # venue_layout: JSON home for future structured layout data (the
+    # PlanNXT interchange) — costs nothing until something fills it.
+    refund_policy = Column(Text, nullable=True)
+    venue_map_url = Column(String, nullable=True)
+    venue_layout = Column(Text, nullable=True)  # JSON as text; parsed by whoever consumes it
+
     # Events360 owns the real start/end dates. Cached here (refreshed
     # whenever the organizer loads or saves this profile, which already
     # calls Events360) so the PUBLIC page — which has no login and can't

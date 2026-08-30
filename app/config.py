@@ -40,6 +40,22 @@ class Settings(BaseSettings):
     smtp_password: str = ""
     mail_from: str = ""  # e.g. tickets@events360.app — must be a verified sender at the provider
 
+    # Stripe. Test keys (sk_test_...) until real sales day, then a
+    # deliberate one-time swap to live keys. The webhook secret is
+    # generated when the webhook endpoint is registered with Stripe —
+    # empty until then, and the webhook route rejects everything while
+    # it's empty (fail closed, never open).
+    stripe_secret_key: str = ""
+    stripe_webhook_secret: str = ""
+
+    # EventNXT's platform fee, baked into the ticket's face value: the
+    # buyer sees a clean price, the organizer bears the fee. These are
+    # config so repricing is a config-var change — and every Order
+    # SNAPSHOTS the computed fee at creation, so a later repricing never
+    # rewrites an existing order's math.
+    platform_fee_percent: float = 3.0
+    platform_fee_fixed_cents: int = 75
+
     class Config:
         env_file = ".env"
 
