@@ -20,6 +20,12 @@ second run refuses instead of duplicating):
 import sys
 import uuid
 
+# Load the FULL model registry, not just the models this script touches —
+# TicketType carries a foreign key to seating_categories, and SQLAlchemy
+# can only resolve it if that table's model is imported too. The web app
+# gets this for free (routers import everything); standalone scripts
+# must do it explicitly. Learned the hard way on first run.
+import app.models.init  # noqa: F401
 from app.database import SessionLocal
 from app.models.event_profile import EventProfile
 from app.models.ticket_type import TicketType
