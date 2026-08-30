@@ -26,7 +26,7 @@ def _client() -> None:
     stripe.api_key = settings.stripe_secret_key
 
 
-def create_checkout_session(order: Order, line_items_data: list[dict], success_url: str, cancel_url: str):
+def create_checkout_session(order: Order, line_items_data: list[dict], success_url: str, cancel_url: str, discount_cents: int = 0, discount_label: str | None = None):
     """
     line_items_data: [{'name': ..., 'unit_price_cents': ..., 'quantity': ..., 'currency': ...}]
     The session expires when our pending hold does — the two deadlines are
@@ -34,6 +34,18 @@ def create_checkout_session(order: Order, line_items_data: list[dict], success_u
     a hold we've already released.
     """
     _client()
+    # A promo discount becomes an ad-hoc single-use Stripe coupon, so the
+    # buyer sees face-value line items plus an explicit discount line
+    # ("ROW10  -$4.00") — honest receipts beat silently-adjusted prices.
+    discounts = None
+    if discount_cents > 0:
+        coupon = stripe.Coupon.create(
+            amount_off=discount_cents,
+            currency=line_items_data[0]["currency"],
+            duration="once",
+            name=(discount_label or "Discount")[:40],
+        )
+        discounts = [{"coupon": coupon.id}]
     session = stripe.checkout.Session.create(
         mode="payment",
         line_items=[
@@ -52,6 +64,7 @@ def create_checkout_session(order: Order, line_items_data: list[dict], success_u
         success_url=success_url,
         cancel_url=cancel_url,
         expires_at=int((datetime.now(timezone.utc) + timedelta(minutes=30)).timestamp()),
+        discounts=discounts,
     )
     return session
 

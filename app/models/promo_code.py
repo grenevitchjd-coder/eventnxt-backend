@@ -1,7 +1,7 @@
 import enum
 import uuid
 
-from sqlalchemy import Boolean, Column, DateTime, Enum as SAEnum, ForeignKey, Numeric, String, Text
+from sqlalchemy import Boolean, Column, DateTime, Enum as SAEnum, ForeignKey, Integer, Numeric, String, Text
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.sql import func
 
@@ -58,5 +58,19 @@ class PromoCode(Base):
     )
     reward_value = Column(Numeric, nullable=True)
     bonus_tiers_overridden = Column(Boolean, nullable=False, default=False)
+
+    # ---- Buyer-facing discount (the influencer-toolkit half) ----
+    # The reward fields above are what the REFERRER earns; these are what
+    # the BUYER saves at native checkout. Both null = attribution-only
+    # code (the original behavior, unchanged). discount_value means
+    # "percent of the order" when discount_type='percentage', or dollars
+    # off when 'flat_amount'. An organizer can tune commission-vs-discount
+    # per code — the salesperson model: deeper discount, different reward.
+    discount_type = Column(String, nullable=True)  # 'percentage' | 'flat_amount' | null
+    discount_value = Column(Numeric, nullable=True)
+    # Tracked-link landings (/e/<slug>?ref=CODE) — clicks -> sales is the
+    # influencer's conversion funnel. Counts link arrivals only, not
+    # organic page views.
+    link_clicks = Column(Integer, nullable=False, default=0, server_default="0")
     referral_message_draft = Column(Text, nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())

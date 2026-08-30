@@ -44,12 +44,23 @@ def record_native_sales(db: Session, order: Order) -> list[Sale]:
     if order.promo_code_id:
         promo_code = db.query(PromoCode).filter(PromoCode.id == order.promo_code_id).first()
 
+    # The discount is order-level but Sale rows are per-item, and
+    # percentage REWARDS must compute on money the buyer actually paid —
+    # so allocate the discount across items proportionally to their face
+    # value, with the final item absorbing rounding remainder so the
+    # cents always sum exactly.
+    face_values = [item.unit_price_cents * item.quantity for item in items]
+    total_face = sum(face_values) or 1
+    allocated = [round(order.discount_cents * fv / total_face) for fv in face_values]
+    if allocated:
+        allocated[-1] = order.discount_cents - sum(allocated[:-1])
+
     sale_date = datetime.now(timezone.utc).date().isoformat()
     sales: list[Sale] = []
-    for item in items:
+    for item, face, disc in zip(items, face_values, allocated):
         # Sale.amount is Numeric DOLLARS (the CSV-era convention);
         # ticketing speaks integer cents — convert at this boundary only.
-        amount = Decimal(item.unit_price_cents * item.quantity) / 100
+        amount = Decimal(face - disc) / 100
         reward = (
             compute_reward(db, promo_code, amount, item.ticket_type_name, item.quantity)
             if promo_code

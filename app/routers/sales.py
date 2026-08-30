@@ -78,6 +78,16 @@ def _serialize_promo_code(db: Session, code: PromoCode) -> PromoCodeResponse:
     )
 
 
+def _validate_discount_fields(discount_type, discount_value):
+    """Both-or-neither; percentage capped at 100. Money-shaped input gets checked at the door."""
+    if discount_type is None and discount_value is None:
+        return
+    if discount_type is None or discount_value is None:
+        raise HTTPException(status_code=400, detail="Discount needs both a type and a value (or neither).")
+    if discount_type == "percentage" and discount_value > 100:
+        raise HTTPException(status_code=400, detail="A percentage discount can't exceed 100.")
+
+
 def _validate_reward_fields(reward_type: str, reward_value, points_rates):
     """
     Which fields are required depends on reward_type — enforced here
@@ -148,6 +158,7 @@ def create_promo_code(
         raise HTTPException(status_code=400, detail=f'The code "{payload.code}" is already in use for this event.')
 
     _validate_reward_fields(payload.reward_type, payload.reward_value, payload.points_rates)
+    _validate_discount_fields(payload.discount_type, payload.discount_value)
 
     code = PromoCode(
         event_id=event_id,
@@ -156,6 +167,8 @@ def create_promo_code(
         reward_type=RewardType(payload.reward_type),
         reward_value=payload.reward_value,
         referral_message_draft=payload.referral_message_draft,
+        discount_type=payload.discount_type,
+        discount_value=payload.discount_value,
     )
     db.add(code)
     db.flush()  # assigns code.id without committing, needed for the FK below
@@ -200,11 +213,14 @@ def update_promo_code(
             )
 
     _validate_reward_fields(payload.reward_type, payload.reward_value, payload.points_rates)
+    _validate_discount_fields(payload.discount_type, payload.discount_value)
 
     code.code = payload.code
     code.reward_type = RewardType(payload.reward_type)
     code.reward_value = payload.reward_value
     code.referral_message_draft = payload.referral_message_draft
+    code.discount_type = payload.discount_type
+    code.discount_value = payload.discount_value
 
     if payload.reward_type == "points":
         sales_service.replace_points_rates(db, code.id, payload.points_rates or [])

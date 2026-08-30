@@ -93,6 +93,15 @@ class CheckoutResponse(BaseModel):
     status: str
 
 
+class PublicPromoCodeCheckResponse(BaseModel):
+    """Buyer-facing only: says whether a code exists and what IT saves
+    THEM — never the referrer's reward terms."""
+
+    valid: bool
+    discount_type: Optional[str] = None  # 'percentage' | 'flat_amount' | None (attribution-only code)
+    discount_value: Optional[float] = None
+
+
 # ---------- Order retrieval (public, by token) ----------
 
 
@@ -116,6 +125,7 @@ class PublicOrderResponse(BaseModel):
     buyer_email: str
     currency: str
     subtotal_cents: int
+    discount_cents: int = 0
     items: list[PublicOrderItemResponse] = []
     tickets: list[PublicTicketResponse] = []
     paid_at: Optional[datetime] = None

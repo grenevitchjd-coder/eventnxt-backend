@@ -57,8 +57,9 @@ class Order(Base):
     buyer_email = Column(String, nullable=False, index=True)  # lowercased at write time; "find my tickets" key
 
     currency = Column(String, nullable=False, default="usd")
-    subtotal_cents = Column(Integer, nullable=False)
-    platform_fee_cents = Column(Integer, nullable=False)
+    subtotal_cents = Column(Integer, nullable=False)  # face value of the tickets, pre-discount
+    discount_cents = Column(Integer, nullable=False, default=0, server_default="0")  # promo discount snapshot
+    platform_fee_cents = Column(Integer, nullable=False)  # computed on (subtotal - discount): money that moved
     organizer_net_cents = Column(Integer, nullable=False)
 
     # Phase 2 hook — promo code applied at checkout (validated before the

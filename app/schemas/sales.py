@@ -39,6 +39,11 @@ class PromoCodeCreateRequest(BaseModel):
     # reward_type.
     points_rates: Optional[List[PointsRateItem]] = None
     referral_message_draft: Optional[str] = None
+    # Optional buyer discount — what the code takes off at native
+    # checkout. Both fields together or neither. 'percentage' value is
+    # 0-100; 'flat_amount' value is dollars off.
+    discount_type: Optional[Literal["percentage", "flat_amount"]] = None
+    discount_value: Optional[Decimal] = Field(default=None, ge=0)
 
 
 class PromoCodeUpdateRequest(BaseModel):
@@ -47,6 +52,11 @@ class PromoCodeUpdateRequest(BaseModel):
     reward_value: Optional[Decimal] = Field(default=None, ge=0)
     points_rates: Optional[List[PointsRateItem]] = None
     referral_message_draft: Optional[str] = None
+    # Optional buyer discount — what the code takes off at native
+    # checkout. Both fields together or neither. 'percentage' value is
+    # 0-100; 'flat_amount' value is dollars off.
+    discount_type: Optional[Literal["percentage", "flat_amount"]] = None
+    discount_value: Optional[Decimal] = Field(default=None, ge=0)
 
 
 class PromoCodeResponse(BaseModel):
@@ -58,6 +68,9 @@ class PromoCodeResponse(BaseModel):
     reward_value: Optional[Decimal] = None
     points_rates: List[PointsRateItem] = []
     referral_message_draft: Optional[str] = None
+    discount_type: Optional[str] = None
+    discount_value: Optional[Decimal] = None
+    link_clicks: int = 0
     created_at: datetime
     # Rollup — computed at read time from this code's attributed sales,
     # not stored columns. total_reward is in the code's own reward unit

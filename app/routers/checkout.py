@@ -28,6 +28,7 @@ from app.models.ticket import Ticket
 from app.models.ticket_type import TicketType
 from app.schemas.ticketing import (
     CheckoutRequest,
+    PublicPromoCodeCheckResponse,
     CheckoutResponse,
     PublicOrderItemResponse,
     PublicOrderResponse,
@@ -106,20 +107,20 @@ def start_checkout(slug: str, payload: CheckoutRequest, db: Session = Depends(ge
             buyer_name=payload.buyer_name,
             buyer_email=payload.buyer_email,
             requested=[(item.ticket_type_id, item.quantity) for item in payload.items],
+            promo_code=promo_code,
         )
     except ticketing.CheckoutError as exc:
         db.rollback()
         raise HTTPException(status_code=400, detail=str(exc))
 
-    if promo_code:
-        order.promo_code_id = promo_code.id
+    amount_due = order.subtotal_cents - order.discount_cents
 
     order_url = f"{settings.eventnxt_frontend_url}/e/{slug}/order/{order.order_token}"
 
-    # $0 order (comps, free RSVP-style types): no Stripe, no fee — paid
-    # instantly, tickets minted now, sales recorded, email fired
-    # best-effort.
-    if order.subtotal_cents == 0:
+    # $0-DUE order (free ticket types, or a 100%-off code): no Stripe,
+    # no fee — paid instantly, tickets minted now, sales recorded, email
+    # fired best-effort.
+    if amount_due == 0:
         tickets = ticketing.fulfill_paid_order(db, order)
         record_native_sales(db, order)
         db.commit()
@@ -143,6 +144,8 @@ def start_checkout(slug: str, payload: CheckoutRequest, db: Session = Depends(ge
             ],
             success_url=order_url,
             cancel_url=f"{settings.eventnxt_frontend_url}/e/{slug}",
+            discount_cents=order.discount_cents,
+            discount_label=(promo_code.code.upper() if promo_code else None),
         )
     except stripe_lib.error.StripeError:
         # The hold self-expires in 30 min either way; surface a clean error.
@@ -155,9 +158,47 @@ def start_checkout(slug: str, payload: CheckoutRequest, db: Session = Depends(ge
     return CheckoutResponse(
         order_token=order.order_token,
         checkout_url=session.url,
-        total_cents=order.subtotal_cents,
+        total_cents=amount_due,
         status="pending",
     )
+
+
+
+@router.get("/public/events/{slug}/promo-codes/{code}", response_model=PublicPromoCodeCheckResponse)
+def check_public_promo_code(slug: str, code: str, db: Session = Depends(get_db)):
+    """
+    Buyer-facing code check for the live "-$4.00 applied" display. Exposes
+    ONLY the buyer-relevant discount terms — never the referrer's reward
+    terms, which are the referrer's business.
+    """
+    profile = _published_profile_or_404(db, slug)
+    promo = (
+        db.query(PromoCode)
+        .filter(PromoCode.event_id == profile.event_id, PromoCode.code.ilike(code.strip()))
+        .first()
+    )
+    if not promo:
+        return PublicPromoCodeCheckResponse(valid=False)
+    return PublicPromoCodeCheckResponse(
+        valid=True,
+        discount_type=promo.discount_type,
+        discount_value=float(promo.discount_value) if promo.discount_value is not None else None,
+    )
+
+
+@router.post("/public/events/{slug}/promo-codes/{code}/click", status_code=204)
+def record_promo_link_click(slug: str, code: str, db: Session = Depends(get_db)):
+    """
+    Tracked-link landing (/e/<slug>?ref=CODE). Always 204 — an
+    unrecognized code reveals nothing (no code enumeration via response
+    differences). Atomic SQL increment: two simultaneous clicks both
+    count.
+    """
+    profile = _published_profile_or_404(db, slug)
+    db.query(PromoCode).filter(
+        PromoCode.event_id == profile.event_id, PromoCode.code.ilike(code.strip())
+    ).update({PromoCode.link_clicks: PromoCode.link_clicks + 1}, synchronize_session=False)
+    db.commit()
 
 
 @router.get("/public/orders/{order_token}", response_model=PublicOrderResponse)
@@ -178,6 +219,7 @@ def get_public_order(order_token: str, db: Session = Depends(get_db)):
         buyer_email=order.buyer_email,
         currency=order.currency,
         subtotal_cents=order.subtotal_cents,
+        discount_cents=order.discount_cents,
         items=[
             PublicOrderItemResponse(
                 ticket_type_name=i.ticket_type_name, quantity=i.quantity, unit_price_cents=i.unit_price_cents

@@ -55,6 +55,21 @@ def compute_platform_fee_cents(subtotal_cents: int) -> int:
     return round(subtotal_cents * settings.platform_fee_percent / 100) + settings.platform_fee_fixed_cents
 
 
+def compute_discount_cents(promo_code, subtotal_cents: int) -> int:
+    """
+    The buyer discount a code takes off a face-value subtotal. Zero when
+    the code carries no discount terms (attribution-only codes). Clamped
+    to the subtotal — a code can make an order free, never negative.
+    """
+    if promo_code is None or promo_code.discount_type is None or promo_code.discount_value is None:
+        return 0
+    if promo_code.discount_type == "percentage":
+        raw = round(subtotal_cents * float(promo_code.discount_value) / 100)
+    else:  # flat_amount — stored in dollars, converted at this boundary
+        raw = round(float(promo_code.discount_value) * 100)
+    return max(0, min(subtotal_cents, raw))
+
+
 def committed_quantities(db: Session, ticket_type_ids: list[uuid.UUID]) -> dict[uuid.UUID, dict]:
     """
     Per ticket type: {'sold': N, 'held': M}. Sold = PAID orders; held =
@@ -118,6 +133,7 @@ def create_pending_order(
     buyer_name: str,
     buyer_email: str,
     requested: list[tuple[uuid.UUID, int]],  # (ticket_type_id, quantity)
+    promo_code=None,  # a resolved PromoCode (or None) — discount + attribution applied here, atomically
 ) -> Order:
     """
     The critical section. Locks the ticket_type rows (ordered by id —
@@ -156,7 +172,11 @@ def create_pending_order(
             )
 
     subtotal = sum(t.price_cents * qty_by_id[t.id] for t in ticket_types)
-    fee = compute_platform_fee_cents(subtotal)
+    discount = compute_discount_cents(promo_code, subtotal)
+    charged = subtotal - discount
+    # The fee is computed on money that actually moves — a 100%-off code
+    # produces a $0 charge and a $0 fee, same as a free ticket type.
+    fee = compute_platform_fee_cents(charged)
 
     order = Order(
         event_id=event_id,
@@ -166,8 +186,10 @@ def create_pending_order(
         buyer_email=buyer_email.strip().lower(),  # lowercased: this is the "find my tickets" key
         currency=ticket_types[0].currency,
         subtotal_cents=subtotal,
+        discount_cents=discount,
         platform_fee_cents=fee,
-        organizer_net_cents=subtotal - fee,
+        organizer_net_cents=charged - fee,
+        promo_code_id=promo_code.id if promo_code else None,
         order_token=generate_order_token(),
         expires_at=datetime.now(timezone.utc) + timedelta(minutes=PENDING_HOLD_MINUTES),
     )
