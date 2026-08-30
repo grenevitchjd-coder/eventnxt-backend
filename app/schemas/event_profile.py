@@ -1,3 +1,4 @@
+# eventnxt-backend: app/schemas/event_profile.py
 import uuid
 from datetime import datetime, time
 from typing import Literal, Optional
@@ -36,6 +37,8 @@ class EventProfileResponse(BaseModel):
     logo_position: Optional[str] = None
     banner_focus: Optional[str] = None
     about_us: Optional[str] = None
+    refund_policy: Optional[str] = None
+    venue_map_url: Optional[str] = None
     cached_start_date: Optional[datetime] = None
     cached_end_date: Optional[datetime] = None
     slug: str
@@ -49,6 +52,10 @@ class EventProfileResponse(BaseModel):
 
 
 # ---------- Links (contacts / socials) ----------
+
+
+class RefundPolicyUpdateRequest(BaseModel):
+    refund_policy: Optional[str] = None
 
 
 class EventProfileLinkCreateRequest(BaseModel):
@@ -170,6 +177,7 @@ class PublicEventProfileResponse(BaseModel):
     logo_position: Optional[str] = None
     banner_focus: Optional[str] = None
     about_us: Optional[str] = None
+    venue_map_url: Optional[str] = None
     cached_start_date: Optional[datetime] = None
     cached_end_date: Optional[datetime] = None
     links: list[EventProfileLinkResponse] = []

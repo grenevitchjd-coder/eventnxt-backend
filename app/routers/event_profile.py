@@ -1,3 +1,4 @@
+# eventnxt-backend: app/routers/event_profile.py
 from datetime import datetime, timezone
 from dateutil import parser as date_parser
 
@@ -11,6 +12,7 @@ from app.models.event_profile_schedule_item import EventProfileScheduleItem
 from app.models.event_profile_photo import EventProfilePhoto, MAX_GALLERY_PHOTOS
 from app.schemas.event_profile import (
     EventProfileCreateOrUpdateRequest,
+    RefundPolicyUpdateRequest,
     EventProfileResponse,
     EventProfileLinkCreateRequest,
     EventProfileLinkResponse,
@@ -51,6 +53,32 @@ def _refresh_cached_dates(profile: EventProfile, user: CurrentUser) -> None:
     """
     profile.cached_start_date = _parse_cached_date(user.event_data.get("start_date"))
     profile.cached_end_date = _parse_cached_date(user.event_data.get("end_date"))
+
+
+def _get_or_create_minimal(db: Session, event_id: str, user: CurrentUser) -> EventProfile:
+    """
+    Refund policy and the venue map are event facts, not page design —
+    an organizer should be able to set them from Event settings before
+    they've ever touched the page editor. When no profile exists yet,
+    create a minimal unpublished one titled after the Events360 event
+    (the page editor prefills from the event name anyway, so the first
+    real Save just overwrites this).
+    """
+    profile = db.query(EventProfile).filter(EventProfile.event_id == event_id).first()
+    if profile:
+        return profile
+    title = (user.event_data or {}).get("name") or "Untitled event"
+    profile = EventProfile(
+        event_id=event_id,
+        title=title,
+        slug=generate_unique_slug(db, title),
+        cached_start_date=_parse_cached_date(user.event_data.get("start_date")),
+        cached_end_date=_parse_cached_date(user.event_data.get("end_date")),
+    )
+    db.add(profile)
+    db.commit()
+    db.refresh(profile)
+    return profile
 
 
 def _split_schedule_for_public(items):
@@ -167,6 +195,54 @@ async def upload_profile_logo(
     profile = _get_or_404(db, event_id)
     url = await upload_banner_photo(file)  # same validation/storage — just a different destination field
     profile.logo_url = url
+    db.commit()
+    db.refresh(profile)
+    return profile
+
+
+@router.patch("/events/{event_id}/profile/refund-policy", response_model=EventProfileResponse)
+def set_refund_policy(
+    event_id: str,
+    payload: RefundPolicyUpdateRequest,
+    db: Session = Depends(get_db),
+    user: CurrentUser = Depends(require_event_access),
+):
+    """Set (or clear, with null/empty) the refund policy shown at checkout
+    and on the buyer's order page. Get-or-creates the profile so this
+    works before the page editor has ever been saved."""
+    profile = _get_or_create_minimal(db, event_id, user)
+    profile.refund_policy = payload.refund_policy or None
+    db.commit()
+    db.refresh(profile)
+    return profile
+
+
+@router.post("/events/{event_id}/profile/venue-map", response_model=EventProfileResponse)
+async def upload_venue_map(
+    event_id: str,
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    user: CurrentUser = Depends(require_event_access),
+):
+    """Upload the venue/seating map image — shown on the public page in
+    every ticketing mode (an external-ticketing event still wants buyers
+    to see the room). Same validation/storage as the banner."""
+    profile = _get_or_create_minimal(db, event_id, user)
+    url = await upload_banner_photo(file)  # same pipeline, different destination field
+    profile.venue_map_url = url
+    db.commit()
+    db.refresh(profile)
+    return profile
+
+
+@router.delete("/events/{event_id}/profile/venue-map", response_model=EventProfileResponse)
+def remove_venue_map(
+    event_id: str,
+    db: Session = Depends(get_db),
+    user: CurrentUser = Depends(require_event_access),
+):
+    profile = _get_or_404(db, event_id)
+    profile.venue_map_url = None
     db.commit()
     db.refresh(profile)
     return profile

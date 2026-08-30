@@ -1,3 +1,4 @@
+# eventnxt-backend: app/models/init.py
 from app.models.guest_type import GuestType  # noqa: F401
 from app.models.guest_type_seating_priority import GuestTypeSeatingPriority  # noqa: F401
 from app.models.guest_type_ticket_allotment import GuestTypeTicketAllotment  # noqa: F401
@@ -23,3 +24,4 @@ from app.models.order import Order, OrderStatus  # noqa: F401
 from app.models.order_item import OrderItem  # noqa: F401
 from app.models.ticket import Ticket, TicketStatus  # noqa: F401
 from app.models.stripe_webhook_event import StripeWebhookEvent  # noqa: F401
+from app.models.event_settings import EventSettings, TICKETING_MODES, SALES_SOURCES, COMP_DELIVERIES  # noqa: F401
