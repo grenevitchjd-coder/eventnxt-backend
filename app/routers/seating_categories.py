@@ -8,7 +8,10 @@ from app.models.guest import Guest, GuestAllocationStatus
 from app.models.guest_type_seating_priority import GuestTypeSeatingPriority
 from app.models.sale import Sale
 from app.models.seating_category import SeatingCategory
+from app.models.zone_section import ZoneSection
 from app.schemas.seating_category import (
+    ZoneSectionsReplaceRequest,
+    ZoneSectionResponse,
     SeatingCategoryCreateRequest,
     SeatingCategoryUpdateRequest,
     SeatingCategoryResponse,
@@ -49,7 +52,24 @@ def list_seating_categories(
     db: Session = Depends(get_db),
     user: CurrentUser = Depends(require_event_access),
 ):
-    return db.query(SeatingCategory).filter(SeatingCategory.event_id == event_id).all()
+    cats = db.query(SeatingCategory).filter(SeatingCategory.event_id == event_id).order_by(SeatingCategory.created_at).all()
+    secs = (
+        db.query(ZoneSection)
+        .filter(ZoneSection.seating_category_id.in_([c.id for c in cats]))
+        .order_by(ZoneSection.sort_order, ZoneSection.created_at)
+        .all()
+        if cats
+        else []
+    )
+    by_cat = {}
+    for sec in secs:
+        by_cat.setdefault(sec.seating_category_id, []).append(sec)
+    out = []
+    for c in cats:
+        resp = SeatingCategoryResponse.model_validate(c)
+        resp.sections = [ZoneSectionResponse.model_validate(x) for x in by_cat.get(c.id, [])]
+        out.append(resp)
+    return out
 
 
 @router.patch("/{category_id}", response_model=SeatingCategoryResponse)
@@ -96,6 +116,74 @@ def update_seating_category(
     db.commit()
     db.refresh(category)
     return category
+
+
+@router.put("/{category_id}/sections", response_model=SeatingCategoryResponse)
+def replace_zone_sections(
+    event_id: str,
+    category_id: str,
+    payload: ZoneSectionsReplaceRequest,
+    db: Session = Depends(get_db),
+    user: CurrentUser = Depends(require_event_access),
+):
+    """
+    Replace the pool's member sections wholesale (the composer sends the
+    full list — same full-replace contract as the profile editor). The
+    pool's capacity is DERIVED as the sum, keeping one true number for
+    every existing consumer. An empty list removes the breakdown and
+    leaves the standalone capacity as-is. Shrinking below already
+    confirmed guests is refused, mirroring the plain capacity check.
+    """
+    category = (
+        db.query(SeatingCategory)
+        .filter(SeatingCategory.id == category_id, SeatingCategory.event_id == event_id)
+        .first()
+    )
+    if not category:
+        raise HTTPException(status_code=404, detail="Seating pool not found for this event.")
+
+    new_total = sum(item.capacity for item in payload.sections)
+    if payload.sections:
+        confirmed_seats = (
+            db.query(func.coalesce(func.sum(Guest.party_size), 0))
+            .filter(
+                Guest.seating_category_id == category.id,
+                Guest.allocation_status == GuestAllocationStatus.CONFIRMED,
+            )
+            .scalar()
+        )
+        if new_total < confirmed_seats:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Sections total {new_total} but {confirmed_seats} seats are already confirmed here.",
+            )
+
+    db.query(ZoneSection).filter(ZoneSection.seating_category_id == category.id).delete()
+    for i, item in enumerate(payload.sections):
+        db.add(
+            ZoneSection(
+                seating_category_id=category.id,
+                section_label=item.section_label.strip(),
+                row_label=(item.row_label or None),
+                capacity=item.capacity,
+                table_count=item.table_count,
+                seats_per_table=item.seats_per_table,
+                sort_order=i,
+            )
+        )
+    if payload.sections:
+        category.capacity = new_total
+    db.commit()
+    db.refresh(category)
+    resp = SeatingCategoryResponse.model_validate(category)
+    resp.sections = [
+        ZoneSectionResponse.model_validate(x)
+        for x in db.query(ZoneSection)
+        .filter(ZoneSection.seating_category_id == category.id)
+        .order_by(ZoneSection.sort_order)
+        .all()
+    ]
+    return resp
 
 
 @router.delete("/{category_id}", status_code=204)

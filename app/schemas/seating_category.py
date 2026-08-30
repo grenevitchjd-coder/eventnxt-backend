@@ -10,6 +10,44 @@ from pydantic import BaseModel, field_validator, model_validator
 ZONE_KINDS = ("ga", "row", "table", "seat")
 
 
+class ZoneSectionItem(BaseModel):
+    section_label: str
+    row_label: Optional[str] = None
+    capacity: int = 1  # derived for table sections
+    table_count: Optional[int] = None
+    seats_per_table: Optional[int] = None
+
+    @model_validator(mode="after")
+    def check_section(self):
+        if not self.section_label.strip():
+            raise ValueError("Every section needs a label.")
+        if self.table_count is not None or self.seats_per_table is not None:
+            if not self.table_count or self.table_count < 1 or not self.seats_per_table or self.seats_per_table < 1:
+                raise ValueError("Table sections need table_count and seats_per_table (both at least 1).")
+            self.capacity = self.table_count * self.seats_per_table
+        elif self.capacity < 1:
+            raise ValueError("Section capacity must be at least 1.")
+        return self
+
+
+class ZoneSectionsReplaceRequest(BaseModel):
+    sections: list[ZoneSectionItem]
+
+
+class ZoneSectionResponse(BaseModel):
+    id: uuid.UUID
+    section_label: str
+    row_label: Optional[str] = None
+    capacity: int
+    table_count: Optional[int] = None
+    seats_per_table: Optional[int] = None
+    sort_order: int
+
+    class Config:
+        from_attributes = True
+
+
+
 class _ZoneFieldsMixin(BaseModel):
     name: str
     capacity: int = 1  # ignored (derived) for table zones
@@ -64,6 +102,7 @@ class SeatingCategoryResponse(BaseModel):
     section_label: Optional[str] = None
     table_count: Optional[int] = None
     seats_per_table: Optional[int] = None
+    sections: list[ZoneSectionResponse] = []
     created_at: datetime
 
     class Config:
