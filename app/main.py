@@ -2,7 +2,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import settings
-from app.routers import auth, me, guest_types, seating_categories, guests, events, event_profile, rsvp, sales
+from app.routers import auth, me, guest_types, seating_categories, guests, events, event_profile, rsvp, sales, ticket_types, checkout
 
 app = FastAPI(
     title="EventNXT",
@@ -27,6 +27,8 @@ app.include_router(seating_categories.router)
 app.include_router(guests.router)
 app.include_router(rsvp.router)
 app.include_router(sales.router)
+app.include_router(ticket_types.router)
+app.include_router(checkout.router)
 
 
 @app.get("/health")

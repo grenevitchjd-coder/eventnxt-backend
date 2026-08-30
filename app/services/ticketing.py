@@ -1,0 +1,269 @@
+"""
+eventnxt-backend: app/services/ticketing.py
+
+The inventory-and-money core of native ticket sales.
+
+Concurrency contract (the house rule: row lock + real test, never "looks
+correct"): every path that consumes inventory locks the ticket_type rows
+FOR UPDATE, in a consistent order (by id — same deadlock-safe discipline
+as seating). Availability = quantity − sold − held, where sold is tickets
+on PAID orders and held is tickets on PENDING orders whose expires_at is
+still in the future. An abandoned checkout releases itself by pure
+passage of time — no cleanup job.
+
+Money contract: integer cents everywhere; the platform fee is computed
+from TODAY's configured rate and SNAPSHOTTED onto the order — later
+repricing never rewrites history. $0 orders pay no fee and never touch
+Stripe.
+"""
+
+import secrets
+import uuid
+from datetime import datetime, timedelta, timezone
+
+from sqlalchemy import func as safunc
+from sqlalchemy.orm import Session
+
+from app.config import settings
+from app.models.order import Order, OrderStatus
+from app.models.order_item import OrderItem
+from app.models.ticket import Ticket, TicketStatus
+from app.models.ticket_type import TicketType
+from app.services.email import EmailNotConfigured, EmailSendError, send_email
+
+PENDING_HOLD_MINUTES = 30  # matched to the Stripe Checkout session expiry
+
+
+class CheckoutError(Exception):
+    """A buyer-facing problem with the requested purchase (sold out, over limit, etc.)."""
+
+
+def generate_order_token() -> str:
+    return secrets.token_urlsafe(24)
+
+
+def generate_ticket_code() -> str:
+    # Human-typeable at the door: T + 10 hex chars, uppercase. Collision
+    # odds are negligible and the unique index is the final referee.
+    return "T" + secrets.token_hex(5).upper()
+
+
+def compute_platform_fee_cents(subtotal_cents: int) -> int:
+    """3% + 75¢ at current config — $0 orders carry no fee (comps are free in every sense)."""
+    if subtotal_cents <= 0:
+        return 0
+    return round(subtotal_cents * settings.platform_fee_percent / 100) + settings.platform_fee_fixed_cents
+
+
+def committed_quantities(db: Session, ticket_type_ids: list[uuid.UUID]) -> dict[uuid.UUID, dict]:
+    """
+    Per ticket type: {'sold': N, 'held': M}. Sold = PAID orders; held =
+    PENDING orders whose hold hasn't expired. EXPIRED/REFUNDED count as
+    nothing — refunded inventory goes back on sale by simply not counting.
+    """
+    now = datetime.now(timezone.utc)
+    rows = (
+        db.query(
+            OrderItem.ticket_type_id,
+            Order.status,
+            safunc.sum(OrderItem.quantity),
+        )
+        .join(Order, OrderItem.order_id == Order.id)
+        .filter(
+            OrderItem.ticket_type_id.in_(ticket_type_ids),
+            (
+                (Order.status == OrderStatus.PAID)
+                | ((Order.status == OrderStatus.PENDING) & (Order.expires_at > now))
+            ),
+        )
+        .group_by(OrderItem.ticket_type_id, Order.status)
+        .all()
+    )
+    result: dict[uuid.UUID, dict] = {tid: {"sold": 0, "held": 0} for tid in ticket_type_ids}
+    for tid, status, qty in rows:
+        if status == OrderStatus.PAID:
+            result[tid]["sold"] += int(qty)
+        else:
+            result[tid]["held"] += int(qty)
+    return result
+
+
+def availability_for(db: Session, ticket_types: list[TicketType]) -> dict[uuid.UUID, dict]:
+    counts = committed_quantities(db, [t.id for t in ticket_types])
+    out = {}
+    for t in ticket_types:
+        c = counts[t.id]
+        out[t.id] = {
+            "sold": c["sold"],
+            "held": c["held"],
+            "available": max(0, t.quantity - c["sold"] - c["held"]),
+        }
+    return out
+
+
+def is_on_sale(t: TicketType, available: int) -> bool:
+    now = datetime.now(timezone.utc)
+    if not t.is_active or available <= 0:
+        return False
+    if t.sales_start and now < t.sales_start:
+        return False
+    if t.sales_end and now > t.sales_end:
+        return False
+    return True
+
+
+def create_pending_order(
+    db: Session,
+    event_id: uuid.UUID,
+    buyer_name: str,
+    buyer_email: str,
+    requested: list[tuple[uuid.UUID, int]],  # (ticket_type_id, quantity)
+) -> Order:
+    """
+    The critical section. Locks the ticket_type rows (ordered by id —
+    deadlock-safe), re-checks availability UNDER the lock, then creates
+    the order + items + hold. Raises CheckoutError with a buyer-readable
+    message on any problem. Caller commits.
+    """
+    ids = sorted({tid for tid, _ in requested})
+    qty_by_id: dict[uuid.UUID, int] = {}
+    for tid, qty in requested:
+        qty_by_id[tid] = qty_by_id.get(tid, 0) + qty
+
+    ticket_types = (
+        db.query(TicketType)
+        .filter(TicketType.id.in_(ids), TicketType.event_id == event_id)
+        .order_by(TicketType.id)
+        .with_for_update()
+        .all()
+    )
+    if len(ticket_types) != len(ids):
+        raise CheckoutError("One of the selected ticket types no longer exists for this event.")
+
+    avail = availability_for(db, ticket_types)
+
+    for t in ticket_types:
+        want = qty_by_id[t.id]
+        a = avail[t.id]["available"]
+        if not is_on_sale(t, a):
+            raise CheckoutError(f'"{t.name}" is not currently on sale.')
+        if want > t.max_per_order:
+            raise CheckoutError(f'"{t.name}" allows at most {t.max_per_order} per order.')
+        if want > a:
+            raise CheckoutError(
+                f'Only {a} left for "{t.name}" — someone may have beaten you to it. '
+                "Adjust the quantity and try again."
+            )
+
+    subtotal = sum(t.price_cents * qty_by_id[t.id] for t in ticket_types)
+    fee = compute_platform_fee_cents(subtotal)
+
+    order = Order(
+        event_id=event_id,
+        organization_id=ticket_types[0].organization_id,
+        status=OrderStatus.PENDING,
+        buyer_name=buyer_name.strip(),
+        buyer_email=buyer_email.strip().lower(),  # lowercased: this is the "find my tickets" key
+        currency=ticket_types[0].currency,
+        subtotal_cents=subtotal,
+        platform_fee_cents=fee,
+        organizer_net_cents=subtotal - fee,
+        order_token=generate_order_token(),
+        expires_at=datetime.now(timezone.utc) + timedelta(minutes=PENDING_HOLD_MINUTES),
+    )
+    db.add(order)
+    # autoflush is OFF in this app (deliberate, existing choice) — flush
+    # explicitly so order.id exists for the items. This is the exact
+    # pattern the bonus-tier bug taught (handoff doc, Section 5).
+    db.flush()
+
+    for t in ticket_types:
+        db.add(
+            OrderItem(
+                order_id=order.id,
+                ticket_type_id=t.id,
+                quantity=qty_by_id[t.id],
+                unit_price_cents=t.price_cents,  # snapshot
+                ticket_type_name=t.name,  # snapshot
+            )
+        )
+    db.flush()
+    return order
+
+
+def fulfill_paid_order(db: Session, order: Order) -> list[Ticket]:
+    """
+    Marks the order PAID and mints its Ticket rows (one per admission,
+    unique code each). Idempotent by construction: called only from the
+    webhook (which is idempotency-guarded) or the $0 instant path, and
+    a second call on an already-PAID order returns the existing tickets
+    instead of minting again. Caller commits.
+    """
+    if order.status == OrderStatus.PAID:
+        return db.query(Ticket).filter(Ticket.order_id == order.id).all()
+
+    order.status = OrderStatus.PAID
+    order.paid_at = datetime.now(timezone.utc)
+    order.expires_at = None  # paid orders hold forever; the deadline is meaningless now
+    db.flush()
+
+    items = db.query(OrderItem).filter(OrderItem.order_id == order.id).all()
+    tickets: list[Ticket] = []
+    for item in items:
+        for _ in range(item.quantity):
+            ticket = Ticket(
+                order_id=order.id,
+                order_item_id=item.id,
+                ticket_type_id=item.ticket_type_id,
+                event_id=order.event_id,
+                code=generate_ticket_code(),
+                status=TicketStatus.VALID,
+            )
+            db.add(ticket)
+            tickets.append(ticket)
+    db.flush()
+    return tickets
+
+
+def _format_money(cents: int, currency: str) -> str:
+    symbol = "$" if currency.lower() == "usd" else ""
+    return f"{symbol}{cents / 100:.2f} {currency.upper()}" if not symbol else f"{symbol}{cents / 100:.2f}"
+
+
+def send_order_confirmation_email(order: Order, tickets: list[Ticket], event_title: str, order_url: str) -> bool:
+    """
+    Best-effort by design: the paid order is sacred, the email is
+    retryable (the buyer can always self-serve via Find My Tickets).
+    Returns True if sent; never raises.
+    """
+    try:
+        ticket_lines = "\n".join(f"  - {t.code}" for t in tickets)
+        ticket_rows = "".join(
+            f"<tr><td style='padding:4px 12px;font-family:monospace'>{t.code}</td></tr>" for t in tickets
+        )
+        total = _format_money(order.subtotal_cents, order.currency)
+        send_email(
+            to=order.buyer_email,
+            subject=f"Your tickets for {event_title}",
+            text_body=(
+                f"Hi {order.buyer_name},\n\n"
+                f"You're in! Here are your tickets for {event_title}.\n\n"
+                f"Total paid: {total}\n\n"
+                f"Ticket codes:\n{ticket_lines}\n\n"
+                f"View your order any time:\n{order_url}\n\n"
+                "Keep this email — your codes are your admission.\n\n"
+                "— EventNXT"
+            ),
+            html_body=(
+                f"<p>Hi {order.buyer_name},</p>"
+                f"<p>You're in! Here are your tickets for <strong>{event_title}</strong>.</p>"
+                f"<p>Total paid: <strong>{total}</strong></p>"
+                f"<table>{ticket_rows}</table>"
+                f"<p><a href='{order_url}'>View your order any time</a></p>"
+                "<p>Keep this email — your codes are your admission.</p>"
+                "<p>&mdash; EventNXT</p>"
+            ),
+        )
+        return True
+    except (EmailNotConfigured, EmailSendError):
+        return False

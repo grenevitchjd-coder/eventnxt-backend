@@ -37,6 +37,10 @@ class TicketType(Base):
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     event_id = Column(UUID(as_uuid=True), nullable=False, index=True)  # Events360 event, stored ref not FK
+    # Snapshotted from Events360's event payload when the ORGANIZER creates
+    # this ticket type (they're authenticated; buyers aren't) — checkout
+    # copies it onto each order for the per-organizer ledger.
+    organization_id = Column(UUID(as_uuid=True), nullable=False, index=True)
     seating_category_id = Column(UUID(as_uuid=True), ForeignKey("seating_categories.id"), nullable=True)
 
     name = Column(String, nullable=False)
