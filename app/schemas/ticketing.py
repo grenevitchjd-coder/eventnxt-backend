@@ -130,3 +130,30 @@ class PublicOrderResponse(BaseModel):
     tickets: list[PublicTicketResponse] = []
     paid_at: Optional[datetime] = None
     refund_policy: Optional[str] = None
+
+
+# ---------- Orders admin (organizer-facing) ----------
+
+
+class AdminOrderItem(BaseModel):
+    ticket_type_name: str
+    quantity: int
+    unit_price_cents: int
+
+
+class AdminOrderResponse(BaseModel):
+    id: uuid.UUID
+    status: str
+    buyer_name: str
+    buyer_email: str
+    currency: str
+    subtotal_cents: int
+    discount_cents: int
+    platform_fee_cents: int
+    organizer_net_cents: int
+    order_token: str  # lets the admin open the buyer's order page directly
+    items: list[AdminOrderItem] = []
+    ticket_count: int = 0
+    created_at: Optional[datetime] = None
+    paid_at: Optional[datetime] = None
+    refunded_at: Optional[datetime] = None

@@ -74,3 +74,11 @@ def construct_webhook_event(payload: bytes, signature_header: str):
     if not settings.stripe_webhook_secret:
         raise WebhookNotConfigured("STRIPE_WEBHOOK_SECRET is not set — refusing all webhooks (fail closed).")
     return stripe.Webhook.construct_event(payload, signature_header, settings.stripe_webhook_secret)
+
+
+def create_refund(payment_intent_id: str):
+    """Full refund of the payment. Stripe keeps its processing fee — that
+    cost lands on the organizer per policy; EventNXT's platform fee is
+    returned in the ledger arithmetic (Phase 3) rather than here."""
+    _client()
+    return stripe.Refund.create(payment_intent=payment_intent_id)
