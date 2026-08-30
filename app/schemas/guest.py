@@ -1,3 +1,4 @@
+# eventnxt-backend: app/schemas/guest.py
 import uuid
 from datetime import datetime
 from typing import List, Literal, Optional
@@ -21,6 +22,7 @@ class GuestCreateRequest(BaseModel):
     perks: Optional[str] = None
     comments: Optional[str] = None
     ticket_allotment: Optional[List[TicketAllotmentDayItem]] = None
+    guest_mode: Optional[Literal["invite", "distribute", "select"]] = None
 
 
 class GuestUpdateRequest(BaseModel):
@@ -34,6 +36,7 @@ class GuestUpdateRequest(BaseModel):
     perks: Optional[str] = None
     comments: Optional[str] = None
     ticket_allotment: Optional[List[TicketAllotmentDayItem]] = None
+    guest_mode: Optional[Literal["invite", "distribute", "select"]] = None
 
 
 class GuestResponse(BaseModel):
@@ -55,6 +58,10 @@ class GuestResponse(BaseModel):
     allocated_by_guest_id: Optional[uuid.UUID] = None
     rsvp_token: str
     rsvp_confirmed: Optional[str] = None
+    guest_mode: Optional[str] = None
+    effective_mode: str = "invite"
+    needs_seating: bool = False
+    ticket_count: int = 0
     link_sent_at: Optional[datetime] = None
     created_at: datetime
 

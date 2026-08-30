@@ -25,3 +25,4 @@ from app.models.order_item import OrderItem  # noqa: F401
 from app.models.ticket import Ticket, TicketStatus  # noqa: F401
 from app.models.stripe_webhook_event import StripeWebhookEvent  # noqa: F401
 from app.models.event_settings import EventSettings, TICKETING_MODES, SALES_SOURCES, COMP_DELIVERIES  # noqa: F401
+from app.models.guest_ticket_request import GuestTicketRequest, REQUEST_STATUSES  # noqa: F401

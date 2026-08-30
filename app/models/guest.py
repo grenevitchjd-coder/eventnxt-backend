@@ -1,3 +1,4 @@
+# eventnxt-backend: app/models/guest.py
 import enum
 import uuid
 
@@ -84,6 +85,16 @@ class Guest(Base):
     # Set when this guest was created by someone else's distribution —
     # links back to the allotment holder who gave them the ticket.
     allocated_by_guest_id = Column(UUID(as_uuid=True), ForeignKey("guests.id"), nullable=True)
+
+    # Explicit guest experience: 'invite' | 'distribute' | 'select'.
+    # NULL = derived the legacy way (allotment holder -> distribute,
+    # otherwise invite). This per-guest value overrides the type default.
+    guest_mode = Column(String, nullable=True)
+
+    # RSVP said yes but no section could seat them — the yes is recorded,
+    # allocation stays PENDING (capacity math never counts a phantom
+    # seat), and this flag is the organizer's Needs-seating queue.
+    needs_seating = Column(Boolean, nullable=False, default=False)
 
     rsvp_token = Column(String, unique=True, nullable=False, index=True)
     rsvp_confirmed = Column(String, nullable=True)  # simple for now: null/pending, "yes", "no"

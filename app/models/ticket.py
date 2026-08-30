@@ -32,9 +32,14 @@ class Ticket(Base):
     __tablename__ = "tickets"
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    order_id = Column(UUID(as_uuid=True), ForeignKey("orders.id"), nullable=False, index=True)
-    order_item_id = Column(UUID(as_uuid=True), ForeignKey("order_items.id"), nullable=False)
-    ticket_type_id = Column(UUID(as_uuid=True), ForeignKey("ticket_types.id"), nullable=False, index=True)
+# Order lineage — null for comp tickets (which carry guest_id instead).
+    # A ticket has one parent or the other, never neither: enforced at the
+    # two mint sites (checkout fulfillment / comp issuance).
+    order_id = Column(UUID(as_uuid=True), ForeignKey("orders.id"), nullable=True, index=True)
+    order_item_id = Column(UUID(as_uuid=True), ForeignKey("order_items.id"), nullable=True)
+    ticket_type_id = Column(UUID(as_uuid=True), ForeignKey("ticket_types.id"), nullable=True, index=True)
+    # Comp lineage — the guest this admission belongs to.
+    guest_id = Column(UUID(as_uuid=True), ForeignKey("guests.id"), nullable=True, index=True)
     event_id = Column(UUID(as_uuid=True), nullable=False, index=True)  # denormalized for door-day lookups
 
     code = Column(String, nullable=False, unique=True, index=True)  # human-readable unique admission code

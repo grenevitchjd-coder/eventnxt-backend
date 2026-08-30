@@ -1,3 +1,4 @@
+# eventnxt-backend: app/routers/rsvp.py
 import secrets
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -8,6 +9,7 @@ from app.models.guest import Guest, GuestAllocationStatus
 from app.models.guest_type import GuestType
 from app.models.promo_code import PromoCode, RewardType
 from app.models.reward_redemption import RewardRedemption
+from app.models.guest_ticket_request import GuestTicketRequest
 from app.schemas.rsvp import (
     DayAllotment,
     DistributedRecipient,
@@ -18,9 +20,11 @@ from app.schemas.rsvp import (
     RSVPInfoResponse,
     RSVPRedeemRequest,
     RSVPRespondRequest,
+    RSVPTicketRequestCreate,
 )
 from app.services import redemptions as redemptions_service
 from app.services import seating
+from app.services import comp_tickets
 
 router = APIRouter(tags=["rsvp"])
 
@@ -89,14 +93,35 @@ def _build_referral_codes(db: Session, event_id: str, guest_id: str):
     return result
 
 
+def _guest_extras(db: Session, guest: Guest, allotment: dict) -> dict:
+    """The mode/needs-seating/ticket fields both RSVPInfoResponse shapes share."""
+    codes = [t.code for t in comp_tickets.valid_comp_tickets(db, guest)]
+    latest_req = (
+        db.query(GuestTicketRequest)
+        .filter(GuestTicketRequest.guest_id == guest.id)
+        .order_by(GuestTicketRequest.created_at.desc())
+        .first()
+    )
+    mode = comp_tickets.effective_guest_mode(db, guest, allotment)
+    available_days = sorted(allotment.keys()) if mode == "select" else None
+    return {
+        "effective_mode": mode,
+        "needs_seating": bool(guest.needs_seating),
+        "available_days": available_days,
+        "ticket_codes": codes or None,
+        "ticket_request_status": latest_req.status if latest_req else None,
+    }
+
+
 @router.get("/public/rsvp/{token}", response_model=RSVPInfoResponse)
 def get_rsvp_info(token: str, db: Session = Depends(get_db)):
     guest = _get_guest_by_token_or_404(db, token)
     guest_type = db.query(GuestType).filter(GuestType.id == guest.guest_type_id).first()
 
     allotment = seating.effective_allotment(db, guest)
+    mode = comp_tickets.effective_guest_mode(db, guest, allotment)
 
-    if not seating.is_allotment_holder(allotment):
+    if mode != "distribute":
         return RSVPInfoResponse(
             guest_name=guest.name,
             guest_type_name=guest_type.name,
@@ -105,6 +130,7 @@ def get_rsvp_info(token: str, db: Session = Depends(get_db)):
             party_size=guest.party_size,
             is_allotment_holder=False,
             referral_codes=_build_referral_codes(db, str(guest.event_id), str(guest.id)),
+            **_guest_extras(db, guest, allotment),
         )
 
     children = db.query(Guest).filter(Guest.allocated_by_guest_id == guest.id).all()
@@ -142,6 +168,7 @@ def get_rsvp_info(token: str, db: Session = Depends(get_db)):
             for c in children
         ],
         referral_codes=_build_referral_codes(db, str(guest.event_id), str(guest.id)),
+        **_guest_extras(db, guest, allotment),
     )
 
 
@@ -154,26 +181,83 @@ def respond_to_rsvp(token: str, payload: RSVPRespondRequest, db: Session = Depen
     """
     guest = _get_guest_by_token_or_404(db, token)
     allotment = seating.effective_allotment(db, guest)
-    if seating.is_allotment_holder(allotment):
+    mode = comp_tickets.effective_guest_mode(db, guest, allotment)
+    if mode == "distribute":
         raise HTTPException(
             status_code=400, detail="This link is for distributing tickets, not a simple RSVP — use /distribute."
         )
 
     if payload.attending:
+        # 'select'-mode guests choose their own day; validate against the
+        # guest type's allotment days when any are defined.
+        if mode == "select" and payload.visit_date:
+            if allotment and payload.visit_date not in allotment:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f'"{payload.visit_date}" isn\'t one of the valid dates for this invitation.',
+                )
+            guest.visit_date = payload.visit_date
+
         new_category_id = seating.resolve_seating_from_priorities(
             db, str(guest.event_id), str(guest.guest_type_id), party_size=guest.party_size
         )
         if new_category_id is None and seating.has_seating_priorities(db, str(guest.guest_type_id)):
-            raise HTTPException(status_code=400, detail="Sorry — there's no room left for this event.")
-        guest.seating_category_id = new_category_id
-        guest.allocation_status = GuestAllocationStatus.CONFIRMED
-        guest.rsvp_confirmed = "yes"
+            # SOFT landing, not a hard error: the yes is recorded, no seat
+            # is claimed (allocation stays PENDING so capacity math never
+            # counts a phantom), and the guest lands in the organizer's
+            # Needs-seating queue. A hard "no room" to a comp guest —
+            # often a sponsor or VIP — loses their yes entirely.
+            guest.rsvp_confirmed = "yes"
+            guest.needs_seating = True
+        else:
+            guest.seating_category_id = new_category_id
+            guest.allocation_status = GuestAllocationStatus.CONFIRMED
+            guest.rsvp_confirmed = "yes"
+            guest.needs_seating = False
+            # Selling through EventNXT: a confirmed yes mints and emails
+            # real admission codes (same table and format as paid tickets,
+            # so Find My Tickets and future QR check-in treat comps
+            # identically). Idempotent — auto-send may have minted already.
+            if comp_tickets.is_native_ticketing(db, guest.event_id):
+                tickets = comp_tickets.issue_comp_tickets(db, guest)
+                db.flush()
+                comp_tickets.send_comp_ticket_email(db, guest, tickets)
     else:
         guest.allocation_status = GuestAllocationStatus.DECLINED
         guest.rsvp_confirmed = "no"
+        guest.needs_seating = False
+        # A declined guest releases their seat back to the pool.
+        guest.seating_category_id = None
 
     db.commit()
     db.refresh(guest)
+    return get_rsvp_info(token, db)
+
+
+@router.post("/public/rsvp/{token}/request-tickets", response_model=RSVPInfoResponse)
+def request_more_tickets(token: str, payload: RSVPTicketRequestCreate, db: Session = Depends(get_db)):
+    """
+    An invite/select guest asking the organizer for more tickets. One
+    open request at a time — a pending one must be resolved before the
+    next. Shows up in the Guests tab, where the capacity picture lives.
+    """
+    guest = _get_guest_by_token_or_404(db, token)
+    allotment = seating.effective_allotment(db, guest)
+    mode = comp_tickets.effective_guest_mode(db, guest, allotment)
+    if mode == "distribute":
+        raise HTTPException(
+            status_code=400,
+            detail="This link distributes an allotment — add recipients instead of requesting tickets.",
+        )
+    pending = (
+        db.query(GuestTicketRequest)
+        .filter(GuestTicketRequest.guest_id == guest.id, GuestTicketRequest.status == "pending")
+        .first()
+    )
+    if pending:
+        raise HTTPException(status_code=400, detail="You already have a request waiting for the organizer.")
+    db.add(GuestTicketRequest(guest_id=guest.id, quantity=payload.quantity, note=payload.note or None))
+    db.commit()
     return get_rsvp_info(token, db)
 
 
@@ -190,7 +274,7 @@ def distribute_tickets(token: str, payload: RSVPDistributeRequest, db: Session =
     """
     guest = _get_guest_by_token_or_404(db, token)
     allotment = seating.effective_allotment(db, guest)
-    if not seating.is_allotment_holder(allotment):
+    if comp_tickets.effective_guest_mode(db, guest, allotment) != "distribute":
         raise HTTPException(status_code=400, detail="This link doesn't have tickets to distribute.")
 
     if not payload.recipients:

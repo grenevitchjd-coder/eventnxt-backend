@@ -1,3 +1,4 @@
+# eventnxt-backend: app/routers/guests.py
 import secrets
 from datetime import datetime, timezone
 
@@ -17,7 +18,9 @@ from app.schemas.guest import (
     GuestSentStatusRequest,
     TicketAllotmentDayItem,
 )
-from app.services import seating
+from app.models.guest_ticket_request import GuestTicketRequest
+from app.schemas.guest_ticket_request import GuestTicketRequestResponse
+from app.services import comp_tickets, seating
 from app.services.deps import CurrentUser
 from app.services.event_access import require_event_access
 
@@ -53,6 +56,10 @@ def _serialize_guest(db: Session, guest: Guest) -> GuestResponse:
         allocated_by_guest_id=guest.allocated_by_guest_id,
         rsvp_token=guest.rsvp_token,
         rsvp_confirmed=guest.rsvp_confirmed,
+        guest_mode=guest.guest_mode,
+        effective_mode=comp_tickets.effective_guest_mode(db, guest),
+        needs_seating=bool(guest.needs_seating),
+        ticket_count=len(comp_tickets.valid_comp_tickets(db, guest)),
         link_sent_at=guest.link_sent_at,
         created_at=guest.created_at,
     )
@@ -124,6 +131,7 @@ def create_guest(
         perks=payload.perks,
         comments=payload.comments,
         ticket_allotment_overridden=payload.ticket_allotment is not None,
+        guest_mode=payload.guest_mode,
         rsvp_token=secrets.token_urlsafe(24),
     )
     db.add(guest)
@@ -131,6 +139,21 @@ def create_guest(
 
     if payload.ticket_allotment is not None:
         seating.replace_guest_ticket_allotment(db, guest.id, payload.ticket_allotment)
+
+    # Auto-send delivery (Event settings): the moment an invite/select
+    # guest with a resolved seat is added to a native-ticketing event,
+    # their admission codes mint and email — no RSVP round-trip. Guests
+    # whose seat couldn't resolve, and distribute-mode holders, are
+    # untouched (holders hand out tickets; they don't hold one).
+    if (
+        comp_tickets.comp_delivery_for(db, event_id) == "auto_send"
+        and comp_tickets.is_native_ticketing(db, event_id)
+        and guest.allocation_status == GuestAllocationStatus.CONFIRMED
+        and comp_tickets.effective_guest_mode(db, guest) in ("invite", "select")
+    ):
+        tickets = comp_tickets.issue_comp_tickets(db, guest)
+        db.flush()
+        comp_tickets.send_comp_ticket_email(db, guest, tickets)
 
     db.commit()
     db.refresh(guest)
@@ -198,6 +221,7 @@ def update_guest(
     guest.visit_date = payload.visit_date
     guest.perks = payload.perks
     guest.comments = payload.comments
+    guest.guest_mode = payload.guest_mode
 
     if payload.ticket_allotment is not None:
         guest.ticket_allotment_overridden = True
@@ -230,6 +254,165 @@ def set_guest_sent_status(
     db.commit()
     db.refresh(guest)
     return _serialize_guest(db, guest)
+
+
+@router.post("/{guest_id}/send-ticket", response_model=GuestResponse)
+def send_ticket(
+    event_id: str,
+    guest_id: str,
+    db: Session = Depends(get_db),
+    user: CurrentUser = Depends(require_event_access),
+):
+    """
+    The Needs-seating queue's resolve button — and a plain re-send for
+    any guest. Assign seating first (PATCH the guest, or let this walk
+    the priority list), then this confirms them, mints any missing comp
+    tickets up to party_size, and emails the codes.
+    """
+    guest = db.query(Guest).filter(Guest.id == guest_id, Guest.event_id == event_id).first()
+    if not guest:
+        raise HTTPException(status_code=404, detail="Guest not found for this event.")
+
+    if not comp_tickets.is_native_ticketing(db, event_id):
+        raise HTTPException(
+            status_code=400,
+            detail="Comp ticket codes only exist for events selling through EventNXT (see Event settings).",
+        )
+
+    if guest.seating_category_id is None:
+        resolved = seating.resolve_seating_from_priorities(
+            db, event_id, str(guest.guest_type_id), party_size=guest.party_size
+        )
+        if resolved is None and seating.has_seating_priorities(db, str(guest.guest_type_id)):
+            raise HTTPException(
+                status_code=400,
+                detail="Still no room in this guest type's sections — raise a capacity or assign a section on the guest first.",
+            )
+        guest.seating_category_id = resolved
+    elif guest.allocation_status != GuestAllocationStatus.CONFIRMED:
+        # Explicit section on the guest — honor it, but never over capacity.
+        seating.check_capacity(db, event_id, guest.seating_category_id, party_size=guest.party_size, exclude_guest_id=guest.id)
+
+    guest.allocation_status = GuestAllocationStatus.CONFIRMED
+    guest.needs_seating = False
+    tickets = comp_tickets.issue_comp_tickets(db, guest)
+    db.flush()
+    sent = comp_tickets.send_comp_ticket_email(db, guest, tickets)
+    if sent:
+        guest.link_sent_at = datetime.now(timezone.utc)
+    db.commit()
+    db.refresh(guest)
+    return _serialize_guest(db, guest)
+
+
+@router.get("/ticket-requests/all", response_model=list[GuestTicketRequestResponse])
+def list_ticket_requests(
+    event_id: str,
+    db: Session = Depends(get_db),
+    user: CurrentUser = Depends(require_event_access),
+):
+    rows = (
+        db.query(GuestTicketRequest, Guest)
+        .join(Guest, Guest.id == GuestTicketRequest.guest_id)
+        .filter(Guest.event_id == event_id)
+        .order_by(GuestTicketRequest.status.desc(), GuestTicketRequest.created_at.desc())
+        .all()
+    )
+    return [
+        GuestTicketRequestResponse(
+            id=req.id,
+            guest_id=g.id,
+            guest_name=g.name,
+            guest_email=g.email,
+            current_party_size=g.party_size,
+            quantity=req.quantity,
+            note=req.note,
+            status=req.status,
+            created_at=req.created_at,
+            resolved_at=req.resolved_at,
+        )
+        for req, g in rows
+    ]
+
+
+@router.post("/ticket-requests/{request_id}/approve", response_model=GuestTicketRequestResponse)
+def approve_ticket_request(
+    event_id: str,
+    request_id: str,
+    db: Session = Depends(get_db),
+    user: CurrentUser = Depends(require_event_access),
+):
+    """
+    Approve = the guest's party grows by the requested amount. If they're
+    already confirmed with a seat on a native-ticketing event, the extra
+    admission codes mint and email immediately; otherwise they arrive
+    through the normal confirm path. Capacity: a confirmed guest's grown
+    party is re-checked against their section before anything changes.
+    """
+    row = (
+        db.query(GuestTicketRequest, Guest)
+        .join(Guest, Guest.id == GuestTicketRequest.guest_id)
+        .filter(GuestTicketRequest.id == request_id, Guest.event_id == event_id)
+        .first()
+    )
+    if not row:
+        raise HTTPException(status_code=404, detail="Request not found for this event.")
+    req, guest = row
+    if req.status != "pending":
+        raise HTTPException(status_code=400, detail="This request was already resolved.")
+
+    new_party = guest.party_size + req.quantity
+    if guest.allocation_status == GuestAllocationStatus.CONFIRMED and guest.seating_category_id:
+        seating.check_capacity(
+            db, event_id, guest.seating_category_id, party_size=new_party, exclude_guest_id=guest.id
+        )
+    guest.party_size = new_party
+    comp_tickets.mark_resolved(req, "approved")
+
+    if (
+        guest.allocation_status == GuestAllocationStatus.CONFIRMED
+        and comp_tickets.is_native_ticketing(db, event_id)
+        and comp_tickets.valid_comp_tickets(db, guest)
+    ):
+        tickets = comp_tickets.issue_comp_tickets(db, guest)
+        db.flush()
+        comp_tickets.send_comp_ticket_email(db, guest, tickets)
+
+    db.commit()
+    db.refresh(req)
+    return GuestTicketRequestResponse(
+        id=req.id, guest_id=guest.id, guest_name=guest.name, guest_email=guest.email,
+        current_party_size=guest.party_size, quantity=req.quantity, note=req.note,
+        status=req.status, created_at=req.created_at, resolved_at=req.resolved_at,
+    )
+
+
+@router.post("/ticket-requests/{request_id}/deny", response_model=GuestTicketRequestResponse)
+def deny_ticket_request(
+    event_id: str,
+    request_id: str,
+    db: Session = Depends(get_db),
+    user: CurrentUser = Depends(require_event_access),
+):
+    row = (
+        db.query(GuestTicketRequest, Guest)
+        .join(Guest, Guest.id == GuestTicketRequest.guest_id)
+        .filter(GuestTicketRequest.id == request_id, Guest.event_id == event_id)
+        .first()
+    )
+    if not row:
+        raise HTTPException(status_code=404, detail="Request not found for this event.")
+    req, guest = row
+    if req.status != "pending":
+        raise HTTPException(status_code=400, detail="This request was already resolved.")
+    comp_tickets.mark_resolved(req, "denied")
+    db.commit()
+    db.refresh(req)
+    return GuestTicketRequestResponse(
+        id=req.id, guest_id=guest.id, guest_name=guest.name, guest_email=guest.email,
+        current_party_size=guest.party_size, quantity=req.quantity, note=req.note,
+        status=req.status, created_at=req.created_at, resolved_at=req.resolved_at,
+    )
 
 
 @router.delete("/{guest_id}", status_code=204)

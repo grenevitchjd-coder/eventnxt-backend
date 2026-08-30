@@ -1,3 +1,4 @@
+# eventnxt-backend: app/routers/guest_types.py
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
@@ -44,7 +45,7 @@ def create_guest_type(
     preferences and the ticket allotment are both added separately — see
     the /seating-priorities and /ticket-allotments endpoints below.
     """
-    guest_type = GuestType(event_id=event_id, name=payload.name)
+    guest_type = GuestType(event_id=event_id, name=payload.name, guest_mode=payload.guest_mode)
     db.add(guest_type)
     db.commit()
     db.refresh(guest_type)
@@ -68,6 +69,7 @@ def update_guest_type(
 ):
     guest_type = _get_guest_type_or_404(db, event_id, guest_type_id)
     guest_type.name = payload.name
+    guest_type.guest_mode = payload.guest_mode
     db.commit()
     db.refresh(guest_type)
     return guest_type

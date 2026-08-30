@@ -1,3 +1,4 @@
+# eventnxt-backend: app/models/guest_type.py
 import uuid
 
 from sqlalchemy import Column, String, DateTime
@@ -23,5 +24,10 @@ class GuestType(Base):
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     event_id = Column(UUID(as_uuid=True), nullable=False, index=True)
-    name = Column(String, nullable=False)  # e.g. "Celebrity", "Sponsor", "Volunteer", "Model"
+    name = Column(String, nullable=False)
+
+    # Default guest experience for this type ('invite' | 'distribute' |
+    # 'select'); NULL = derived from allotments the legacy way. A guest's
+    # own guest_mode overrides this.
+    guest_mode = Column(String, nullable=True)  # e.g. "Celebrity", "Sponsor", "Volunteer", "Model"
     created_at = Column(DateTime(timezone=True), server_default=func.now())

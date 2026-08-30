@@ -1,3 +1,4 @@
+# eventnxt-backend: app/schemas/rsvp.py
 from typing import List, Literal, Optional
 
 from pydantic import BaseModel, EmailStr, Field
@@ -32,6 +33,21 @@ class RSVPInfoResponse(BaseModel):
     is_allotment_holder: bool
     day_allotments: Optional[List[DayAllotment]] = None
     distributed_recipients: Optional[List["DistributedRecipient"]] = None
+
+    # The guest's actual experience ('invite' | 'distribute' | 'select'),
+    # so the page renders the right interaction without re-deriving it.
+    effective_mode: str = "invite"
+    # RSVP'd yes but seating couldn't resolve — page shows the soft
+    # "your ticket will arrive once seating is finalized" message.
+    needs_seating: bool = False
+    # 'select' mode: the days this guest may choose from (guest-type
+    # allotment days when defined; empty = free choice).
+    available_days: Optional[List[str]] = None
+    # Comp admission codes already issued to this guest, shown on the
+    # page after confirming (same codes that were emailed).
+    ticket_codes: Optional[List[str]] = None
+    # Latest more-tickets request, if any: 'pending' | 'approved' | 'denied'.
+    ticket_request_status: Optional[str] = None
 
     # Present whenever this guest holds one or more promo codes —
     # independent of is_allotment_holder, since a referrer might not be a
@@ -76,6 +92,13 @@ class DistributedRecipient(BaseModel):
 
 class RSVPRespondRequest(BaseModel):
     attending: bool
+    # 'select'-mode guests choose their own day; ignored for other modes.
+    visit_date: Optional[str] = None
+
+
+class RSVPTicketRequestCreate(BaseModel):
+    quantity: int = Field(ge=1, le=10)
+    note: Optional[str] = None
 
 
 class RSVPDistributeRecipient(BaseModel):

@@ -1,21 +1,28 @@
+# eventnxt-backend: app/schemas/guest_type.py
 import uuid
 from datetime import datetime
 
 from pydantic import BaseModel, Field
 
 
+GUEST_MODE_FIELD = Field(default=None, pattern="^(invite|distribute|select)$")
+
+
 class GuestTypeCreateRequest(BaseModel):
     name: str
+    guest_mode: str | None = GUEST_MODE_FIELD
 
 
 class GuestTypeUpdateRequest(BaseModel):
     name: str
+    guest_mode: str | None = GUEST_MODE_FIELD
 
 
 class GuestTypeResponse(BaseModel):
     id: uuid.UUID
     event_id: uuid.UUID
     name: str
+    guest_mode: str | None = None
     created_at: datetime
 
     class Config:
