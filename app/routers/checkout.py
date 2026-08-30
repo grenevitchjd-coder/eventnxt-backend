@@ -28,6 +28,7 @@ from app.models.ticket import Ticket
 from app.models.ticket_type import TicketType
 from app.schemas.ticketing import (
     CheckoutRequest,
+    FindMyTicketsRequest,
     PublicPromoCodeCheckResponse,
     CheckoutResponse,
     PublicOrderItemResponse,
@@ -199,6 +200,77 @@ def record_promo_link_click(slug: str, code: str, db: Session = Depends(get_db))
         PromoCode.event_id == profile.event_id, PromoCode.code.ilike(code.strip())
     ).update({PromoCode.link_clicks: PromoCode.link_clicks + 1}, synchronize_session=False)
     db.commit()
+
+
+
+# In-memory cooldown for the lookup mailer — per-process, resets on dyno
+# restart, which is honest-enough abuse protection for v1 on a single web
+# dyno (the worst case after a restart is one extra email). Upgrade to a
+# real table if this ever runs on multiple dynos.
+_find_tickets_last_sent: dict[str, float] = {}
+_FIND_TICKETS_COOLDOWN_SECONDS = 300
+
+
+@router.post("/public/events/{slug}/find-my-tickets", status_code=200)
+def find_my_tickets(slug: str, payload: FindMyTicketsRequest, db: Session = Depends(get_db)):
+    """
+    Self-serve ticket recovery, the way real ticket companies do it:
+    NEVER display tickets for a typed email — send them TO that email.
+    Possession of the inbox is the authentication. The response is
+    identical whether or not orders exist (no probing which emails
+    bought), same philosophy as unpublished pages 404ing identically.
+    """
+    import time
+
+    profile = _published_profile_or_404(db, slug)
+    email = payload.email.strip().lower()
+
+    now = time.monotonic()
+    last = _find_tickets_last_sent.get(email)
+    generic = {"status": "ok"}
+    if last is not None and now - last < _FIND_TICKETS_COOLDOWN_SECONDS:
+        return generic  # silently rate-limited — still the identical response
+    _find_tickets_last_sent[email] = now
+
+    orders = (
+        db.query(Order)
+        .filter(
+            Order.event_id == profile.event_id,
+            Order.buyer_email == email,
+            Order.status.in_([OrderStatus.PAID, OrderStatus.REFUNDED]),
+        )
+        .order_by(Order.created_at)
+        .all()
+    )
+    if not orders:
+        return generic
+
+    lines = []
+    for o in orders:
+        items = db.query(OrderItem).filter(OrderItem.order_id == o.id).all()
+        summary = ", ".join(f"{i.quantity}x {i.ticket_type_name}" for i in items)
+        note = " (refunded)" if o.status == OrderStatus.REFUNDED else ""
+        lines.append(
+            f"- {summary}{note}\n  {settings.eventnxt_frontend_url}/e/{slug}/order/{o.order_token}"
+        )
+
+    try:
+        from app.services.email import send_email
+
+        send_email(
+            to=email,
+            subject=f"Your tickets for {profile.title}",
+            text_body=(
+                f"Here are the ticket orders we have for this email at {profile.title}:\n\n"
+                + "\n\n".join(lines)
+                + "\n\nEach link opens that order's tickets. Keep this email handy at the door.\n\n"
+                + "— EventNXT"
+            ),
+        )
+    except Exception:
+        pass  # identical outward behavior even if the mailer hiccups
+
+    return generic
 
 
 @router.get("/public/orders/{order_token}", response_model=PublicOrderResponse)

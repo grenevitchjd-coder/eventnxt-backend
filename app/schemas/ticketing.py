@@ -102,6 +102,10 @@ class PublicPromoCodeCheckResponse(BaseModel):
     discount_value: Optional[float] = None
 
 
+class FindMyTicketsRequest(BaseModel):
+    email: EmailStr
+
+
 # ---------- Order retrieval (public, by token) ----------
 
 
