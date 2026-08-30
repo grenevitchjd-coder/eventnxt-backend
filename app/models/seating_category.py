@@ -1,3 +1,4 @@
+# eventnxt-backend: app/models/seating_category.py
 import uuid
 
 from sqlalchemy import Column, String, Integer, DateTime
@@ -32,5 +33,13 @@ class SeatingCategory(Base):
     event_id = Column(UUID(as_uuid=True), nullable=False, index=True)
     name = Column(String, nullable=False)  # e.g. "Front Center", "Row 4", "Standing Room"
     capacity = Column(Integer, nullable=False)
-    sales_grain = Column(String, nullable=False, default="ga", server_default="ga")  # 'ga' | 'seat'
+    sales_grain = Column(String, nullable=False, default="ga", server_default="ga")  # 'ga' | 'row' | 'table' | 'seat'
+    # Structure metadata — what this zone physically is. Descriptive in
+    # this slice (the grid builder fills them systematically next):
+    row_label = Column(String, nullable=True)  # "Row 1", "Rows 3–4"
+    section_label = Column(String, nullable=True)  # "All sections", "Sections C–D"
+    # Table zones: capacity is DERIVED (table_count × seats_per_table) at
+    # the router, so `capacity` stays the one number all machinery reads.
+    table_count = Column(Integer, nullable=True)
+    seats_per_table = Column(Integer, nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())

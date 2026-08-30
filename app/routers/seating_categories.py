@@ -1,3 +1,4 @@
+# eventnxt-backend: app/routers/seating_categories.py
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import func
 from sqlalchemy.orm import Session
@@ -26,7 +27,16 @@ def create_seating_category(
     db: Session = Depends(get_db),
     user: CurrentUser = Depends(require_event_access),
 ):
-    category = SeatingCategory(event_id=event_id, name=payload.name, capacity=payload.capacity)
+    category = SeatingCategory(
+        event_id=event_id,
+        name=payload.name,
+        capacity=payload.capacity,
+        sales_grain=payload.sales_grain,
+        row_label=(payload.row_label or None),
+        section_label=(payload.section_label or None),
+        table_count=payload.table_count,
+        seats_per_table=payload.seats_per_table,
+    )
     db.add(category)
     db.commit()
     db.refresh(category)
@@ -78,6 +88,11 @@ def update_seating_category(
 
     category.name = payload.name
     category.capacity = payload.capacity
+    category.sales_grain = payload.sales_grain
+    category.row_label = payload.row_label or None
+    category.section_label = payload.section_label or None
+    category.table_count = payload.table_count
+    category.seats_per_table = payload.seats_per_table
     db.commit()
     db.refresh(category)
     return category
