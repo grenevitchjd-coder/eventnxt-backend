@@ -312,8 +312,14 @@ def send_order_confirmation_email(order: Order, tickets: list[Ticket], event_tit
     """
     try:
         ticket_lines = "\n".join(f"  - {t.code}" for t in tickets)
+        qr_base = f"{settings.eventnxt_backend_url}/public/tickets"
         ticket_rows = "".join(
-            f"<tr><td style='padding:4px 12px;font-family:monospace'>{t.code}</td></tr>" for t in tickets
+            f"<tr><td style='padding:10px 12px;text-align:center'>"
+            f"<img src='{qr_base}/{t.code}/qr.png' width='150' height='150' "
+            f"style='display:block;margin:0 auto 6px;border-radius:8px' alt='QR for {t.code}'/>"
+            f"<span style='font-family:monospace;font-size:15px'>{t.code}</span>"
+            f"</td></tr>"
+            for t in tickets
         )
         total = _format_money(order.subtotal_cents, order.currency)
         send_email(

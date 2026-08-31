@@ -127,10 +127,27 @@ def send_comp_ticket_email(db: Session, guest: Guest, tickets: list[Ticket]) -> 
         f"See you there!"
     )
 
+    qr_base = f"{app_settings.eventnxt_backend_url}/public/tickets"
+    code_cells = "".join(
+        f"<tr><td style='padding:10px 12px;text-align:center'>"
+        f"<img src='{qr_base}/{t.code}/qr.png' width='150' height='150' "
+        f"style='display:block;margin:0 auto 6px;border-radius:8px' alt='QR for {t.code}'/>"
+        f"<span style='font-family:monospace;font-size:15px'>{t.code}</span>"
+        f"</td></tr>"
+        for t in tickets
+    )
+    html = (
+        f"<p>Hi {guest.name},</p>"
+        f"<p>You're confirmed for <strong>{event_name}</strong>.{(' Date: ' + str(guest.visit_date)) if guest.visit_date else ''}</p>"
+        f"<p>Your admission code{plural} — show at the door (scannable or typed):</p>"
+        f"<table>{code_cells}</table>"
+        f"<p>See you there!</p>"
+    )
+
     try:
         from app.services.email import send_email
 
-        send_email(to=guest.email, subject=f"Your ticket{plural} for {event_name}", text_body=text)
+        send_email(to=guest.email, subject=f"Your ticket{plural} for {event_name}", text_body=text, html_body=html)
         return True
     except Exception:
         return False

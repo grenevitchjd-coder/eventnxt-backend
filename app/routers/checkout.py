@@ -347,6 +347,34 @@ def find_my_tickets(slug: str, payload: FindMyTicketsRequest, db: Session = Depe
     return generic
 
 
+@router.get("/public/tickets/{code}/qr.png")
+def public_ticket_qr(code: str, db: Session = Depends(get_db)):
+    """
+    The scannable form of a ticket code, as a PNG — embedded by the
+    order/comp emails and loadable anywhere a code is shown. Knowing the
+    code IS the credential (same trust as the code printed beside it),
+    so the QR adds no new exposure; unknown codes 404 so this can't be
+    used as an oracle beyond code validity, which Find My Tickets
+    already exposes.
+    """
+    import io
+
+    import segno
+    from fastapi.responses import Response
+
+    clean = code.strip().upper()
+    exists = db.query(Ticket.id).filter(Ticket.code == clean).first()
+    if not exists:
+        raise HTTPException(status_code=404, detail="Unknown ticket code.")
+    buf = io.BytesIO()
+    segno.make(clean, error="m").save(buf, kind="png", scale=6, border=2)
+    return Response(
+        content=buf.getvalue(),
+        media_type="image/png",
+        headers={"Cache-Control": "public, max-age=86400, immutable"},
+    )
+
+
 @router.get("/public/orders/{order_token}", response_model=PublicOrderResponse)
 def get_public_order(order_token: str, db: Session = Depends(get_db)):
     order = db.query(Order).filter(Order.order_token == order_token).first()
