@@ -16,6 +16,7 @@ class TicketTypeCreateOrUpdateRequest(BaseModel):
     price_cents: int = Field(ge=0)  # 0 is legal — a free/comp type that skips Stripe entirely
     quantity: int = Field(ge=0)
     max_per_order: int = Field(default=10, ge=1)
+    admits: int = Field(default=1, ge=1)
     seating_category_id: Optional[uuid.UUID] = None
     sales_start: Optional[datetime] = None
     sales_end: Optional[datetime] = None
@@ -33,6 +34,7 @@ class TicketTypeAdminResponse(BaseModel):
     currency: str
     quantity: int
     max_per_order: int
+    admits: int = 1
     sales_start: Optional[datetime] = None
     sales_end: Optional[datetime] = None
     is_active: bool
@@ -56,6 +58,7 @@ class PublicTicketTypeResponse(BaseModel):
     price_cents: int
     currency: str
     max_per_order: int
+    admits: int = 1
     available: int
     on_sale: bool  # active AND inside the sales window AND available > 0
 

@@ -6,7 +6,10 @@ from sqlalchemy.orm import Session
 from app.database import get_db
 from app.models.guest import Guest, GuestAllocationStatus
 from app.models.guest_type_seating_priority import GuestTypeSeatingPriority
-from app.models.sale import Sale
+from app.models.order import Order, OrderStatus
+from app.models.order_item import OrderItem
+from app.models.sale import Sale, SaleSource
+from app.models.ticket_type import TicketType
 from app.models.seating_category import SeatingCategory
 from app.models.zone_section import ZoneSection
 from app.schemas.seating_category import (
@@ -231,12 +234,35 @@ def get_seating_summary(
 
     rows = []
     for category in categories:
-        box_office = (
+        # Box office counts HEADS. Native sales: paid order items × the
+        # ticket type's `admits` (a $400 table admitting 4 is 4 heads
+        # against this pool). CSV-imported sales predate admits and
+        # count as-is. Native Sale rows are EXCLUDED here to avoid
+        # double-counting — they still record units for promo/referral
+        # math, which must never be inflated by admits.
+        csv_heads = (
             db.query(func.coalesce(func.sum(Sale.quantity), 0))
-            .filter(Sale.event_id == event_id, Sale.ticket_type.ilike(category.name))
+            .filter(
+                Sale.event_id == event_id,
+                Sale.ticket_type.ilike(category.name),
+                Sale.source != SaleSource.NATIVE,
+            )
             .scalar()
             or 0
         )
+        native_heads = (
+            db.query(func.coalesce(func.sum(OrderItem.quantity * TicketType.admits), 0))
+            .join(TicketType, TicketType.id == OrderItem.ticket_type_id)
+            .join(Order, Order.id == OrderItem.order_id)
+            .filter(
+                Order.event_id == event_id,
+                Order.status == OrderStatus.PAID,
+                TicketType.seating_category_id == category.id,
+            )
+            .scalar()
+            or 0
+        )
+        box_office = csv_heads + native_heads
         allotted = (
             db.query(func.coalesce(func.sum(Guest.party_size), 0))
             .filter(

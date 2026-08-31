@@ -230,9 +230,14 @@ def fulfill_paid_order(db: Session, order: Order) -> list[Ticket]:
     db.flush()
 
     items = db.query(OrderItem).filter(OrderItem.order_id == order.id).all()
+    # One purchased unit mints `admits` codes (whole tables, group packs).
+    admits_by_tt = {
+        tt.id: (tt.admits or 1)
+        for tt in db.query(TicketType).filter(TicketType.id.in_([i.ticket_type_id for i in items])).all()
+    } if items else {}
     tickets: list[Ticket] = []
     for item in items:
-        for _ in range(item.quantity):
+        for _ in range(item.quantity * admits_by_tt.get(item.ticket_type_id, 1)):
             ticket = Ticket(
                 order_id=order.id,
                 order_item_id=item.id,

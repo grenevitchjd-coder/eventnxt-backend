@@ -77,6 +77,7 @@ def list_public_ticket_types(slug: str, db: Session = Depends(get_db)):
             price_cents=t.price_cents,
             currency=t.currency,
             max_per_order=t.max_per_order,
+            admits=t.admits or 1,
             available=avail[t.id]["available"],
             on_sale=ticketing.is_on_sale(t, avail[t.id]["available"]),
         )

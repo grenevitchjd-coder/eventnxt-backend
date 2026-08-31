@@ -49,6 +49,8 @@ class TicketType(Base):
     currency = Column(String, nullable=False, default="usd")
     quantity = Column(Integer, nullable=False)
     max_per_order = Column(Integer, nullable=False, default=10)
+    # One purchased unit mints this many admission codes (tables, packs).
+    admits = Column(Integer, nullable=False, default=1, server_default="1")
 
     # Optional sales window — outside it the type shows as "not on sale".
     sales_start = Column(DateTime(timezone=True), nullable=True)

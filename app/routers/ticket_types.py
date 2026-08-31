@@ -57,6 +57,7 @@ def create_ticket_type(
         price_cents=payload.price_cents,
         quantity=payload.quantity,
         max_per_order=payload.max_per_order,
+        admits=payload.admits,
         sales_start=payload.sales_start,
         sales_end=payload.sales_end,
         is_active=payload.is_active,
@@ -89,6 +90,7 @@ def update_ticket_type(
     ticket_type.price_cents = payload.price_cents
     ticket_type.quantity = payload.quantity
     ticket_type.max_per_order = payload.max_per_order
+    ticket_type.admits = payload.admits
     ticket_type.seating_category_id = payload.seating_category_id
     ticket_type.sales_start = payload.sales_start
     ticket_type.sales_end = payload.sales_end
