@@ -24,6 +24,8 @@ from app.models.order import Order, OrderStatus
 from app.models.order_item import OrderItem
 from app.models.promo_code import PromoCode
 from app.models.stripe_webhook_event import StripeWebhookEvent
+from app.models.seat import Seat
+from app.models.seating_category import SeatingCategory
 from app.models.ticket import Ticket
 from app.models.ticket_type import TicketType
 from app.schemas.ticketing import (
@@ -35,7 +37,11 @@ from app.schemas.ticketing import (
     PublicOrderResponse,
     PublicTicketResponse,
     PublicTicketTypeResponse,
+    PublicSeatMapResponse,
+    PublicSeatResponse,
+    PublicSeatSectionResponse,
 )
+from app.services import seats as seats_service
 from app.services import ticketing
 from app.services.native_sales import record_native_sales
 from app.services.stripe_gateway import WebhookNotConfigured, construct_webhook_event, create_checkout_session
@@ -69,6 +75,17 @@ def list_public_ticket_types(slug: str, db: Session = Depends(get_db)):
         .all()
     )
     avail = ticketing.availability_for(db, ticket_types) if ticket_types else {}
+    assigned_pool_ids = (
+        {
+            c.id
+            for c in db.query(SeatingCategory)
+            .filter(SeatingCategory.id.in_([t.seating_category_id for t in ticket_types if t.seating_category_id]))
+            .all()
+            if c.sales_grain == "seat"
+        }
+        if ticket_types
+        else set()
+    )
     return [
         PublicTicketTypeResponse(
             id=t.id,
@@ -78,11 +95,54 @@ def list_public_ticket_types(slug: str, db: Session = Depends(get_db)):
             currency=t.currency,
             max_per_order=t.max_per_order,
             admits=t.admits or 1,
+            assigned_seating=t.seating_category_id in assigned_pool_ids,
             available=avail[t.id]["available"],
             on_sale=ticketing.is_on_sale(t, avail[t.id]["available"]),
         )
         for t in ticket_types
     ]
+
+
+@router.get("/public/events/{slug}/ticket-types/{ticket_type_id}/seats", response_model=PublicSeatMapResponse)
+def public_seat_map(slug: str, ticket_type_id: uuid.UUID, db: Session = Depends(get_db)):
+    """
+    The seat picker's data: every seat of the ticket type's pool grouped
+    by section, flagged available or not (sold, held on a live order, or
+    organizer-blocked all read as unavailable). Serving the FULL map —
+    not just open seats — lets the schematic gray out what's gone.
+    """
+    profile = _published_profile_or_404(db, slug)
+    tt = (
+        db.query(TicketType)
+        .filter(TicketType.id == ticket_type_id, TicketType.event_id == profile.event_id)
+        .first()
+    )
+    if not tt or not tt.seating_category_id:
+        raise HTTPException(status_code=404, detail="Ticket type not found.")
+    seats = (
+        db.query(Seat)
+        .filter(Seat.seating_category_id == tt.seating_category_id)
+        .order_by(Seat.section_label, Seat.row_label, Seat.seat_number)
+        .all()
+    )
+    taken = seats_service.taken_seat_ids(db, [s.id for s in seats])
+    grouped = {}
+    for seat in seats:
+        grouped.setdefault((seat.section_label, seat.row_label), []).append(seat)
+    return PublicSeatMapResponse(
+        ticket_type_id=tt.id,
+        sections=[
+            PublicSeatSectionResponse(
+                section_label=sec,
+                row_label=row,
+                seats=[
+                    PublicSeatResponse(id=x.id, seat_number=x.seat_number, available=(x.id not in taken and not x.is_blocked))
+                    for x in xs
+                ],
+            )
+            for (sec, row), xs in grouped.items()
+        ],
+    )
 
 
 @router.post("/public/events/{slug}/checkout", response_model=CheckoutResponse)
@@ -108,7 +168,7 @@ def start_checkout(slug: str, payload: CheckoutRequest, db: Session = Depends(ge
             event_id=profile.event_id,
             buyer_name=payload.buyer_name,
             buyer_email=payload.buyer_email,
-            requested=[(item.ticket_type_id, item.quantity) for item in payload.items],
+            requested=[(item.ticket_type_id, item.quantity, item.seat_ids) for item in payload.items],
             promo_code=promo_code,
         )
     except ticketing.CheckoutError as exc:
@@ -283,6 +343,10 @@ def get_public_order(order_token: str, db: Session = Depends(get_db)):
     profile = db.query(EventProfile).filter(EventProfile.event_id == order.event_id).first()
     items = db.query(OrderItem).filter(OrderItem.order_id == order.id).all()
     tickets = db.query(Ticket).filter(Ticket.order_id == order.id).all()
+    seat_ids = [t.seat_id for t in tickets if t.seat_id]
+    seat_labels = (
+        {x.id: x.label for x in db.query(Seat).filter(Seat.id.in_(seat_ids)).all()} if seat_ids else {}
+    )
 
     return PublicOrderResponse(
         status=order.status.value,
@@ -300,7 +364,12 @@ def get_public_order(order_token: str, db: Session = Depends(get_db)):
             for i in items
         ],
         tickets=[
-            PublicTicketResponse(code=t.code, ticket_type_name=_ticket_type_name(items, t), status=t.status.value)
+            PublicTicketResponse(
+                code=t.code,
+                ticket_type_name=_ticket_type_name(items, t),
+                status=t.status.value,
+                seat_label=seat_labels.get(t.seat_id),
+            )
             for t in tickets
         ],
         paid_at=order.paid_at,

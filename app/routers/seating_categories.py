@@ -20,6 +20,7 @@ from app.schemas.seating_category import (
     SeatingCategoryResponse,
     SeatingSummaryRow,
 )
+from app.services import seats as seats_service
 from app.services.deps import CurrentUser
 from app.services.event_access import require_event_access
 
@@ -116,6 +117,10 @@ def update_seating_category(
     category.section_label = payload.section_label or None
     category.table_count = payload.table_count
     category.seats_per_table = payload.seats_per_table
+    db.flush()
+    # Switching a pool to (or within) assigned seating regenerates its
+    # seats from the existing section rows.
+    seats_service.sync_seats_for_pool(db, category)
     db.commit()
     db.refresh(category)
     return category
@@ -176,6 +181,10 @@ def replace_zone_sections(
         )
     if payload.sections:
         category.capacity = new_total
+    db.flush()
+    # Assigned pools: regenerate seat records to match the new structure
+    # (surviving seats re-link; sold/held seats can never be destroyed).
+    seats_service.sync_seats_for_pool(db, category)
     db.commit()
     db.refresh(category)
     resp = SeatingCategoryResponse.model_validate(category)

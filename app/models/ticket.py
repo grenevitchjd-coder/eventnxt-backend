@@ -45,6 +45,6 @@ class Ticket(Base):
     code = Column(String, nullable=False, unique=True, index=True)  # human-readable unique admission code
     status = Column(SAEnum(TicketStatus), nullable=False, default=TicketStatus.VALID)
 
-    seat_id = Column(UUID(as_uuid=True), nullable=True)  # future per-seat hook; no FK until a seats table exists
+    seat_id = Column(UUID(as_uuid=True), ForeignKey("seats.id", ondelete="SET NULL"), nullable=True, index=True)  # the assigned seat this code admits to (comps and GA leave it null)
 
     created_at = Column(DateTime(timezone=True), server_default=func.now())

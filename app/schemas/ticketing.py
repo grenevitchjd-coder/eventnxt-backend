@@ -60,7 +60,10 @@ class PublicTicketTypeResponse(BaseModel):
     max_per_order: int
     admits: int = 1
     available: int
-    on_sale: bool  # active AND inside the sales window AND available > 0
+    on_sale: bool
+    # True when this type sells specific seats — the picker swaps the
+    # quantity stepper for section + seat selection.
+    assigned_seating: bool = False  # active AND inside the sales window AND available > 0
 
 
 # ---------- Checkout ----------
@@ -69,6 +72,9 @@ class PublicTicketTypeResponse(BaseModel):
 class CheckoutItemRequest(BaseModel):
     ticket_type_id: uuid.UUID
     quantity: int = Field(ge=1)
+    # Assigned-seat ticket types: the buyer's chosen seats (one per
+    # quantity). Omit for GA/row/table types.
+    seat_ids: Optional[list[uuid.UUID]] = None
 
 
 class CheckoutRequest(BaseModel):
@@ -122,6 +128,7 @@ class PublicTicketResponse(BaseModel):
     code: str
     ticket_type_name: str
     status: str
+    seat_label: Optional[str] = None  # "Section A · Row 1 · Seat 14"
 
 
 class PublicOrderResponse(BaseModel):
@@ -164,3 +171,22 @@ class AdminOrderResponse(BaseModel):
     created_at: Optional[datetime] = None
     paid_at: Optional[datetime] = None
     refunded_at: Optional[datetime] = None
+
+# ---------- Assigned-seat picker ----------
+
+
+class PublicSeatResponse(BaseModel):
+    id: uuid.UUID
+    seat_number: int
+    available: bool
+
+
+class PublicSeatSectionResponse(BaseModel):
+    section_label: str
+    row_label: Optional[str] = None
+    seats: list[PublicSeatResponse] = []
+
+
+class PublicSeatMapResponse(BaseModel):
+    ticket_type_id: uuid.UUID
+    sections: list[PublicSeatSectionResponse] = []

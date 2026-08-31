@@ -29,6 +29,7 @@ from app.models.order import Order, OrderStatus
 from app.models.order_item import OrderItem
 from app.models.ticket import Ticket, TicketStatus
 from app.models.ticket_type import TicketType
+from app.services import seats as seats_service
 from app.services.email import EmailNotConfigured, EmailSendError, send_email
 
 PENDING_HOLD_MINUTES = 30  # matched to the Stripe Checkout session expiry
@@ -132,7 +133,7 @@ def create_pending_order(
     event_id: uuid.UUID,
     buyer_name: str,
     buyer_email: str,
-    requested: list[tuple[uuid.UUID, int]],  # (ticket_type_id, quantity)
+    requested: list[tuple[uuid.UUID, int, list[uuid.UUID] | None]],  # (ticket_type_id, quantity, seat_ids)
     promo_code=None,  # a resolved PromoCode (or None) — discount + attribution applied here, atomically
 ) -> Order:
     """
@@ -141,10 +142,13 @@ def create_pending_order(
     the order + items + hold. Raises CheckoutError with a buyer-readable
     message on any problem. Caller commits.
     """
-    ids = sorted({tid for tid, _ in requested})
+    ids = sorted({tid for tid, _, _ in requested})
     qty_by_id: dict[uuid.UUID, int] = {}
-    for tid, qty in requested:
+    seats_by_id: dict[uuid.UUID, list[uuid.UUID]] = {}
+    for tid, qty, seat_ids in requested:
         qty_by_id[tid] = qty_by_id.get(tid, 0) + qty
+        if seat_ids:
+            seats_by_id.setdefault(tid, []).extend(seat_ids)
 
     ticket_types = (
         db.query(TicketType)
@@ -199,16 +203,32 @@ def create_pending_order(
     # pattern the bonus-tier bug taught (handoff doc, Section 5).
     db.flush()
 
+    order_items: dict[uuid.UUID, OrderItem] = {}
     for t in ticket_types:
-        db.add(
-            OrderItem(
-                order_id=order.id,
-                ticket_type_id=t.id,
-                quantity=qty_by_id[t.id],
-                unit_price_cents=t.price_cents,  # snapshot
-                ticket_type_name=t.name,  # snapshot
-            )
+        item = OrderItem(
+            order_id=order.id,
+            ticket_type_id=t.id,
+            quantity=qty_by_id[t.id],
+            unit_price_cents=t.price_cents,  # snapshot
+            ticket_type_name=t.name,  # snapshot
         )
+        db.add(item)
+        order_items[t.id] = item
+    db.flush()
+
+    # Seat-level holds — the assigned-seat mirror of the quantity hold
+    # above, inside the same locked transaction. Conflicts surface as
+    # buyer-readable CheckoutErrors.
+    for t in ticket_types:
+        picked = seats_by_id.get(t.id)
+        if not picked:
+            continue
+        try:
+            seats_service.lock_and_hold_seats(
+                db, ticket_type=t, quantity=qty_by_id[t.id], seat_ids=picked, order_item_id=order_items[t.id].id
+            )
+        except ValueError as exc:
+            raise CheckoutError(str(exc))
     db.flush()
     return order
 
@@ -237,7 +257,12 @@ def fulfill_paid_order(db: Session, order: Order) -> list[Ticket]:
     } if items else {}
     tickets: list[Ticket] = []
     for item in items:
+        # Assigned seats: stamp each minted code with its chosen seat.
+        # Seat-picked items are admits-1 (enforced at hold time), so the
+        # code count equals the seat count; unpicked items get no stamp.
+        seat_iter = iter(seats_service.seats_for_order_item(db, item.id))
         for _ in range(item.quantity * admits_by_tt.get(item.ticket_type_id, 1)):
+            seat = next(seat_iter, None)
             ticket = Ticket(
                 order_id=order.id,
                 order_item_id=item.id,
@@ -245,6 +270,7 @@ def fulfill_paid_order(db: Session, order: Order) -> list[Ticket]:
                 event_id=order.event_id,
                 code=generate_ticket_code(),
                 status=TicketStatus.VALID,
+                seat_id=seat.id if seat else None,
             )
             db.add(ticket)
             tickets.append(ticket)
