@@ -129,3 +129,48 @@ class SeatingSummaryRow(BaseModel):
     committed: int
     confirmed_avail: int
     estimated_avail: int
+
+# ---------- Reserved seats (admin seat view + block/release) ----------
+
+
+class AdminSeatResponse(BaseModel):
+    """
+    One seat in the organizer's per-pool seat view. status is DERIVED,
+    precedence sold > held > reserved > available — a seat can't be
+    blocked once sold (the block endpoint refuses), so overlap only
+    exists in weird historic states, and the buyer-facing truth wins.
+    """
+
+    id: uuid.UUID
+    zone_section_id: Optional[uuid.UUID] = None
+    section_label: str
+    row_label: Optional[str] = None
+    seat_number: int
+    label: str
+    status: str  # 'available' | 'sold' | 'held' | 'reserved'
+    block_label: Optional[str] = None
+
+
+class SeatBlockRequest(BaseModel):
+    seat_ids: list[uuid.UUID]
+    label: Optional[str] = None  # "Press" — stored on every seat in the batch
+
+    @field_validator("seat_ids")
+    @classmethod
+    def check_ids(cls, v):
+        if not v:
+            raise ValueError("Pick at least one seat.")
+        if len(set(v)) != len(v):
+            raise ValueError("The same seat appears twice.")
+        return v
+
+
+class SeatUnblockRequest(BaseModel):
+    seat_ids: list[uuid.UUID]
+
+    @field_validator("seat_ids")
+    @classmethod
+    def check_ids(cls, v):
+        if not v:
+            raise ValueError("Pick at least one seat.")
+        return v

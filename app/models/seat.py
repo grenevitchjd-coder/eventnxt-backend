@@ -19,8 +19,9 @@ class Seat(Base):
     "Taken" is derived, never stored: a VALID ticket pointing here, or an
     order_item_seats row on an unexpired pending / paid order. Expiry and
     refunds therefore free seats with zero bookkeeping — the same
-    property the quantity holds have. is_blocked is the organizer's kill
-    switch for a broken chair.
+    property the quantity holds have. is_blocked is the organizer's hold
+    switch — a broken chair, or a labeled reservation (block_label:
+    "Press") that Slice B hands to a specific guest.
     """
 
     __tablename__ = "seats"
@@ -35,6 +36,7 @@ class Seat(Base):
     row_label = Column(String, nullable=True)
     seat_number = Column(Integer, nullable=False)
     is_blocked = Column(Boolean, nullable=False, default=False)
+    block_label = Column(String, nullable=True)  # why it's held: "Press", "Sponsor hold"…
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
     @property

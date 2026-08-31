@@ -62,6 +62,109 @@ def taken_seat_ids(db: Session, seat_ids: list[uuid.UUID]) -> set[uuid.UUID]:
     return {s for (s,) in sold} | {s for (s,) in held}
 
 
+def block_seats(db: Session, *, category: SeatingCategory, seat_ids: list[uuid.UUID], label) -> list[Seat]:
+    """
+    Reserve seats (organizer hold). Locks the seat rows FOR UPDATE in id
+    order — the same discipline as the buyer-side hold, so an admin
+    reserving and a buyer checking out the same seat get exactly one
+    winner. Refuses seats that are sold or actively held: a block on a
+    seat a buyer already owns would be a lie in the admin view.
+    Idempotent over already-blocked seats (relabels them).
+    """
+    seats = (
+        db.query(Seat)
+        .filter(Seat.id.in_(seat_ids))
+        .order_by(Seat.id)
+        .with_for_update()
+        .all()
+    )
+    if len(seats) != len(set(seat_ids)):
+        raise HTTPException(status_code=404, detail="One of those seats no longer exists — refresh and try again.")
+    for seat in seats:
+        if seat.seating_category_id != category.id:
+            raise HTTPException(status_code=400, detail=f"{seat.label} isn't in this area.")
+    conflicts = taken_seat_ids(db, [s.id for s in seats])
+    if conflicts:
+        victim = next(s for s in seats if s.id in conflicts)
+        raise HTTPException(
+            status_code=400,
+            detail=f"{victim.label} is already sold or in a buyer's cart — it can't be reserved.",
+        )
+    clean = (label or "").strip() or None
+    for seat in seats:
+        seat.is_blocked = True
+        seat.block_label = clean
+    return seats
+
+
+def unblock_seats(db: Session, *, category: SeatingCategory, seat_ids: list[uuid.UUID]) -> list[Seat]:
+    """Release organizer holds. Locked FOR UPDATE for symmetry; seats
+    that weren't blocked pass through untouched (idempotent)."""
+    seats = (
+        db.query(Seat)
+        .filter(Seat.id.in_(seat_ids))
+        .order_by(Seat.id)
+        .with_for_update()
+        .all()
+    )
+    if len(seats) != len(set(seat_ids)):
+        raise HTTPException(status_code=404, detail="One of those seats no longer exists — refresh and try again.")
+    for seat in seats:
+        if seat.seating_category_id != category.id:
+            raise HTTPException(status_code=400, detail=f"{seat.label} isn't in this area.")
+        seat.is_blocked = False
+        seat.block_label = None
+    return seats
+
+
+def admin_seat_statuses(db: Session, category: SeatingCategory) -> list[dict]:
+    """
+    Every seat in the pool with its derived status for the organizer's
+    seat view. Precedence sold > held > reserved > available (see
+    AdminSeatResponse). One taken_seat_ids pass plus one sold query —
+    no per-seat queries.
+    """
+    seats = (
+        db.query(Seat)
+        .filter(Seat.seating_category_id == category.id)
+        .order_by(Seat.section_label, Seat.row_label, Seat.seat_number)
+        .all()
+    )
+    if not seats:
+        return []
+    ids = [s.id for s in seats]
+    sold = {
+        sid
+        for (sid,) in db.query(Ticket.seat_id)
+        .filter(Ticket.seat_id.in_(ids), Ticket.status == TicketStatus.VALID)
+        .all()
+    }
+    taken = taken_seat_ids(db, ids)  # sold ∪ held
+    out = []
+    for s in seats:
+        if s.id in sold:
+            status = "sold"
+        elif s.id in taken:
+            status = "held"
+        elif s.is_blocked:
+            status = "reserved"
+        else:
+            status = "available"
+        out.append(
+            {
+                "id": s.id,
+                "zone_section_id": s.zone_section_id,
+                "section_label": s.section_label,
+                "row_label": s.row_label,
+                "seat_number": s.seat_number,
+                "label": s.label,
+                "status": status,
+                "block_label": s.block_label,
+            }
+        )
+    return out
+
+
 def sync_seats_for_pool(db: Session, category: SeatingCategory) -> None:
     """
     Make the seats table match the pool's sections. Called inside the
@@ -110,11 +213,16 @@ def sync_seats_for_pool(db: Session, category: SeatingCategory) -> None:
 
     if doomed:
         blocked = taken_seat_ids(db, [s.id for s in doomed])
-        if blocked:
-            victim = next(s for s in doomed if s.id in blocked)
+        # Reserved seats are protected the same way sold ones are: an
+        # organizer restructuring sections must release a "Press" hold
+        # deliberately, never destroy it as a side effect.
+        reserved = [s for s in doomed if s.is_blocked]
+        if blocked or reserved:
+            victim = next(s for s in doomed if s.id in blocked) if blocked else reserved[0]
+            why = "sold or on hold" if blocked else f"reserved ({victim.block_label or 'no label'})"
             raise HTTPException(
                 status_code=400,
-                detail=f"{victim.label} is sold or on hold — it can't be removed by this structure change.",
+                detail=f"{victim.label} is {why} — it can't be removed by this structure change.",
             )
         for seat in doomed:
             db.delete(seat)

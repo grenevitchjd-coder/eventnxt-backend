@@ -13,6 +13,9 @@ from app.models.ticket_type import TicketType
 from app.models.seating_category import SeatingCategory
 from app.models.zone_section import ZoneSection
 from app.schemas.seating_category import (
+    AdminSeatResponse,
+    SeatBlockRequest,
+    SeatUnblockRequest,
     ZoneSectionsReplaceRequest,
     ZoneSectionResponse,
     SeatingCategoryCreateRequest,
@@ -198,6 +201,64 @@ def replace_zone_sections(
         .all()
     ]
     return resp
+
+
+def _pool_or_404(db: Session, event_id: str, category_id: str) -> SeatingCategory:
+    category = (
+        db.query(SeatingCategory)
+        .filter(SeatingCategory.id == category_id, SeatingCategory.event_id == event_id)
+        .first()
+    )
+    if not category:
+        raise HTTPException(status_code=404, detail="Seating pool not found for this event.")
+    return category
+
+
+@router.get("/{category_id}/seats", response_model=list[AdminSeatResponse])
+def list_pool_seats(
+    event_id: str,
+    category_id: str,
+    db: Session = Depends(get_db),
+    user: CurrentUser = Depends(require_event_access),
+):
+    """The organizer's seat view: every seat with its derived status
+    (available / sold / held / reserved) plus the reservation label.
+    Only assigned pools have seats; other grains return []."""
+    category = _pool_or_404(db, event_id, category_id)
+    return seats_service.admin_seat_statuses(db, category)
+
+
+@router.post("/{category_id}/seats/block", response_model=list[AdminSeatResponse])
+def block_pool_seats(
+    event_id: str,
+    category_id: str,
+    payload: SeatBlockRequest,
+    db: Session = Depends(get_db),
+    user: CurrentUser = Depends(require_event_access),
+):
+    """Reserve seats with an optional label ("Press"). Refuses seats a
+    buyer already owns or holds; races with checkout are settled under
+    FOR UPDATE — exactly one winner. Returns the full refreshed seat
+    view so the UI repaints from one response."""
+    category = _pool_or_404(db, event_id, category_id)
+    seats_service.block_seats(db, category=category, seat_ids=payload.seat_ids, label=payload.label)
+    db.commit()
+    return seats_service.admin_seat_statuses(db, category)
+
+
+@router.post("/{category_id}/seats/unblock", response_model=list[AdminSeatResponse])
+def unblock_pool_seats(
+    event_id: str,
+    category_id: str,
+    payload: SeatUnblockRequest,
+    db: Session = Depends(get_db),
+    user: CurrentUser = Depends(require_event_access),
+):
+    """Release organizer holds — the seats go straight back on sale."""
+    category = _pool_or_404(db, event_id, category_id)
+    seats_service.unblock_seats(db, category=category, seat_ids=payload.seat_ids)
+    db.commit()
+    return seats_service.admin_seat_statuses(db, category)
 
 
 @router.delete("/{category_id}", status_code=204)
