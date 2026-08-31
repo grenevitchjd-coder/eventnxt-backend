@@ -45,6 +45,8 @@ def create_seating_category(
         seats_per_table=payload.seats_per_table,
     )
     db.add(category)
+    db.flush()
+    seats_service.sync_seats_for_pool(db, category)  # assigned pools get seats immediately
     db.commit()
     db.refresh(category)
     return category

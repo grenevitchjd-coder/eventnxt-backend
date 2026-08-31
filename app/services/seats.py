@@ -83,10 +83,18 @@ def sync_seats_for_pool(db: Session, category: SeatingCategory) -> None:
         .order_by(ZoneSection.sort_order)
         .all()
     )
-    wanted: dict[tuple, ZoneSection] = {}
-    for sec in sections:
-        for n in range(1, sec.capacity + 1):
-            wanted[_identity(sec.section_label, sec.row_label, n)] = sec
+    wanted: dict[tuple, ZoneSection | None] = {}
+    if sections:
+        for sec in sections:
+            for n in range(1, sec.capacity + 1):
+                wanted[_identity(sec.section_label, sec.row_label, n)] = sec
+    else:
+        # No section breakdown: the pool itself is one implicit section
+        # (pre-composer pools, or a simple assigned block). Labeled by
+        # its section_label, else its name — matching migration 0026.
+        label = category.section_label or category.name
+        for n in range(1, category.capacity + 1):
+            wanted[_identity(label, category.row_label, n)] = None
 
     existing = db.query(Seat).filter(Seat.seating_category_id == category.id).all()
     existing_by_id = {}
@@ -94,7 +102,8 @@ def sync_seats_for_pool(db: Session, category: SeatingCategory) -> None:
     for seat in existing:
         key = _identity(seat.section_label, seat.row_label, seat.seat_number)
         if key in wanted:
-            seat.zone_section_id = wanted[key].id  # re-link (replace recreated the rows)
+            sec = wanted[key]
+            seat.zone_section_id = sec.id if sec else None  # re-link (replace recreated the rows)
             existing_by_id[key] = seat
         else:
             doomed.append(seat)
@@ -117,7 +126,7 @@ def sync_seats_for_pool(db: Session, category: SeatingCategory) -> None:
                 Seat(
                     event_id=category.event_id,
                     seating_category_id=category.id,
-                    zone_section_id=sec.id,
+                    zone_section_id=sec.id if sec else None,
                     section_label=section_label,
                     row_label=row_label,
                     seat_number=n,
