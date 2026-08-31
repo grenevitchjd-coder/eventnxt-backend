@@ -367,7 +367,10 @@ def public_ticket_qr(code: str, db: Session = Depends(get_db)):
     if not exists:
         raise HTTPException(status_code=404, detail="Unknown ticket code.")
     buf = io.BytesIO()
-    segno.make(clean, error="m").save(buf, kind="png", scale=6, border=2)
+    # micro=False is load-bearing: segno auto-selects Micro QR for short
+    # payloads, and Micro QR is unreadable to jsQR, BarcodeDetector, and
+    # many camera apps. Ticket codes are short; force full QR.
+    segno.make(clean, error="m", micro=False).save(buf, kind="png", scale=6, border=2)
     return Response(
         content=buf.getvalue(),
         media_type="image/png",
