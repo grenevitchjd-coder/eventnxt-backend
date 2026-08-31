@@ -25,6 +25,7 @@ from app.models.order_item import OrderItem
 from app.models.promo_code import PromoCode
 from app.models.stripe_webhook_event import StripeWebhookEvent
 from app.models.seat import Seat
+from app.models.zone_section import ZoneSection
 from app.models.seating_category import SeatingCategory
 from app.models.ticket import Ticket
 from app.models.ticket_type import TicketType
@@ -38,6 +39,7 @@ from app.schemas.ticketing import (
     PublicTicketResponse,
     PublicTicketTypeResponse,
     PublicSeatMapResponse,
+    PublicTicketSectionOption,
     PublicSeatResponse,
     PublicSeatSectionResponse,
 )
@@ -75,17 +77,26 @@ def list_public_ticket_types(slug: str, db: Session = Depends(get_db)):
         .all()
     )
     avail = ticketing.availability_for(db, ticket_types) if ticket_types else {}
-    assigned_pool_ids = (
-        {
-            c.id
-            for c in db.query(SeatingCategory)
-            .filter(SeatingCategory.id.in_([t.seating_category_id for t in ticket_types if t.seating_category_id]))
+    pool_ids = [t.seating_category_id for t in ticket_types if t.seating_category_id]
+    pools = db.query(SeatingCategory).filter(SeatingCategory.id.in_(pool_ids)).all() if pool_ids else []
+    assigned_pool_ids = {c.id for c in pools if c.sales_grain == "seat"}
+    section_pool_ids = seats_service.section_required_pool_ids(db, pool_ids)
+    sections_by_pool = {}
+    if section_pool_ids:
+        for sec in (
+            db.query(ZoneSection)
+            .filter(ZoneSection.seating_category_id.in_(list(section_pool_ids)))
+            .order_by(ZoneSection.sort_order)
             .all()
-            if c.sales_grain == "seat"
-        }
-        if ticket_types
-        else set()
-    )
+        ):
+            sections_by_pool.setdefault(sec.seating_category_id, []).append(
+                PublicTicketSectionOption(
+                    id=sec.id,
+                    section_label=sec.section_label,
+                    row_label=sec.row_label,
+                    remaining=max(sec.capacity - seats_service.section_heads_taken(db, sec.id), 0),
+                )
+            )
     return [
         PublicTicketTypeResponse(
             id=t.id,
@@ -96,6 +107,8 @@ def list_public_ticket_types(slug: str, db: Session = Depends(get_db)):
             max_per_order=t.max_per_order,
             admits=t.admits or 1,
             assigned_seating=t.seating_category_id in assigned_pool_ids,
+            section_required=t.seating_category_id in section_pool_ids,
+            sections=sections_by_pool.get(t.seating_category_id, []),
             available=avail[t.id]["available"],
             on_sale=ticketing.is_on_sale(t, avail[t.id]["available"]),
         )
@@ -168,7 +181,7 @@ def start_checkout(slug: str, payload: CheckoutRequest, db: Session = Depends(ge
             event_id=profile.event_id,
             buyer_name=payload.buyer_name,
             buyer_email=payload.buyer_email,
-            requested=[(item.ticket_type_id, item.quantity, item.seat_ids) for item in payload.items],
+            requested=[(item.ticket_type_id, item.quantity, item.seat_ids, item.zone_section_id) for item in payload.items],
             promo_code=promo_code,
         )
     except ticketing.CheckoutError as exc:
@@ -359,7 +372,8 @@ def get_public_order(order_token: str, db: Session = Depends(get_db)):
         discount_cents=order.discount_cents,
         items=[
             PublicOrderItemResponse(
-                ticket_type_name=i.ticket_type_name, quantity=i.quantity, unit_price_cents=i.unit_price_cents
+                ticket_type_name=i.ticket_type_name, quantity=i.quantity, unit_price_cents=i.unit_price_cents,
+                section_label=i.section_label,
             )
             for i in items
         ],
@@ -368,13 +382,22 @@ def get_public_order(order_token: str, db: Session = Depends(get_db)):
                 code=t.code,
                 ticket_type_name=_ticket_type_name(items, t),
                 status=t.status.value,
-                seat_label=seat_labels.get(t.seat_id),
+                seat_label=seat_labels.get(t.seat_id) or _section_label_for(items, t),
             )
             for t in tickets
         ],
         paid_at=order.paid_at,
         refund_policy=profile.refund_policy if profile else None,
     )
+
+
+def _section_label_for(items, ticket):
+    """Section-sold tickets: surface the order item's section where an
+    assigned ticket would show its seat."""
+    for i in items:
+        if i.id == ticket.order_item_id:
+            return i.section_label
+    return None
 
 
 def _ticket_type_name(items: list[OrderItem], ticket: Ticket) -> str:

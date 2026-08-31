@@ -20,7 +20,7 @@ import uuid
 from datetime import datetime, timezone
 
 from fastapi import HTTPException
-from sqlalchemy import or_
+from sqlalchemy import func, or_
 from sqlalchemy.orm import Session
 
 from app.models.order import Order, OrderStatus
@@ -184,4 +184,69 @@ def seats_for_order_item(db: Session, order_item_id: uuid.UUID) -> list[Seat]:
         .filter(OrderItemSeat.order_item_id == order_item_id)
         .order_by(Seat.section_label, Seat.seat_number)
         .all()
+    )
+
+
+# ---------- Section-level selling (unassigned rows / tables) ----------
+
+
+def section_required_pool_ids(db: Session, pool_ids: list) -> set:
+    """Pools whose ticket types must carry a section at checkout: they
+    have a section breakdown and are NOT seat-assigned (seat picking
+    covers those)."""
+    if not pool_ids:
+        return set()
+    pools = db.query(SeatingCategory).filter(SeatingCategory.id.in_(pool_ids)).all()
+    with_sections = {
+        sid for (sid,) in db.query(ZoneSection.seating_category_id).filter(ZoneSection.seating_category_id.in_(pool_ids)).distinct()
+    }
+    return {p.id for p in pools if p.sales_grain in ("row", "table") and p.id in with_sections}
+
+
+def section_heads_taken(db: Session, zone_section_id) -> int:
+    """Heads committed to a section by box office: paid or unexpired
+    pending order items × the ticket type's admits. Comps float at pool
+    level (they have no section) and are governed by pool capacity."""
+    from app.models.ticket_type import TicketType
+
+    now = datetime.now(timezone.utc)
+    return int(
+        db.query(func.coalesce(func.sum(OrderItem.quantity * TicketType.admits), 0))
+        .join(Order, Order.id == OrderItem.order_id)
+        .join(TicketType, TicketType.id == OrderItem.ticket_type_id)
+        .filter(
+            OrderItem.zone_section_id == zone_section_id,
+            or_(
+                Order.status == OrderStatus.PAID,
+                (Order.status == OrderStatus.PENDING) & (Order.expires_at > now),
+            ),
+        )
+        .scalar()
+        or 0
+    )
+
+
+def lock_and_claim_section(db: Session, *, ticket_type, quantity: int, zone_section_id, order_item) -> None:
+    """
+    The section-level hold: lock the section row FOR UPDATE (always
+    after ticket-type locks — consistent global order, same deadlock
+    discipline as seats), re-check heads under the lock, stamp the
+    order item. Raises ValueError with a buyer-readable message.
+    """
+    section = (
+        db.query(ZoneSection).filter(ZoneSection.id == zone_section_id).with_for_update().first()
+    )
+    if not section or section.seating_category_id != ticket_type.seating_category_id:
+        raise ValueError(f'That section doesn\'t belong to "{ticket_type.name}" — refresh and choose again.')
+    heads_wanted = quantity * (ticket_type.admits or 1)
+    heads_taken = section_heads_taken(db, section.id)
+    if heads_taken + heads_wanted > section.capacity:
+        left = max(section.capacity - heads_taken, 0)
+        raise ValueError(
+            f"Section {section.section_label} only has {left} left — someone may have beaten you to it. "
+            "Pick another section or adjust the quantity."
+        )
+    order_item.zone_section_id = section.id
+    order_item.section_label = (
+        f"Section {section.section_label}" + (f" · {section.row_label}" if section.row_label else "")
     )

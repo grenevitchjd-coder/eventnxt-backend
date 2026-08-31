@@ -63,7 +63,19 @@ class PublicTicketTypeResponse(BaseModel):
     on_sale: bool
     # True when this type sells specific seats — the picker swaps the
     # quantity stepper for section + seat selection.
-    assigned_seating: bool = False  # active AND inside the sales window AND available > 0
+    assigned_seating: bool = False
+    # True when the buyer must choose a section (sectioned, unassigned).
+    section_required: bool = False
+    # The choosable sections for section_required types, with live
+    # remaining heads so the picker can show "Section C · 12 left".
+    sections: list["PublicTicketSectionOption"] = []
+
+
+class PublicTicketSectionOption(BaseModel):
+    id: uuid.UUID
+    section_label: str
+    row_label: Optional[str] = None
+    remaining: int = 0  # active AND inside the sales window AND available > 0
 
 
 # ---------- Checkout ----------
@@ -73,8 +85,11 @@ class CheckoutItemRequest(BaseModel):
     ticket_type_id: uuid.UUID
     quantity: int = Field(ge=1)
     # Assigned-seat ticket types: the buyer's chosen seats (one per
-    # quantity). Omit for GA/row/table types.
+    # quantity). Omit for other types.
     seat_ids: Optional[list[uuid.UUID]] = None
+    # Sectioned unassigned types (rows/tables with a breakdown): the
+    # buyer's chosen section — REQUIRED for those types.
+    zone_section_id: Optional[uuid.UUID] = None
 
 
 class CheckoutRequest(BaseModel):
@@ -121,6 +136,7 @@ class FindMyTicketsRequest(BaseModel):
 class PublicOrderItemResponse(BaseModel):
     ticket_type_name: str
     quantity: int
+    section_label: Optional[str] = None
     unit_price_cents: int
 
 

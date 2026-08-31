@@ -27,4 +27,8 @@ class OrderItem(Base):
 
     quantity = Column(Integer, nullable=False)
     unit_price_cents = Column(Integer, nullable=False)  # snapshot
-    ticket_type_name = Column(String, nullable=False)  # snapshot
+    ticket_type_name = Column(String, nullable=False)
+    # Section choice (sectioned, unassigned types): FK survives section
+    # restructures via SET NULL; the label snapshot survives renames.
+    zone_section_id = Column(UUID(as_uuid=True), ForeignKey("zone_sections.id", ondelete="SET NULL"), nullable=True, index=True)
+    section_label = Column(String, nullable=True)  # snapshot

@@ -133,7 +133,7 @@ def create_pending_order(
     event_id: uuid.UUID,
     buyer_name: str,
     buyer_email: str,
-    requested: list[tuple[uuid.UUID, int, list[uuid.UUID] | None]],  # (ticket_type_id, quantity, seat_ids)
+    requested: list[tuple[uuid.UUID, int, list[uuid.UUID] | None, uuid.UUID | None]],  # (ticket_type_id, quantity, seat_ids, zone_section_id)
     promo_code=None,  # a resolved PromoCode (or None) — discount + attribution applied here, atomically
 ) -> Order:
     """
@@ -142,13 +142,16 @@ def create_pending_order(
     the order + items + hold. Raises CheckoutError with a buyer-readable
     message on any problem. Caller commits.
     """
-    ids = sorted({tid for tid, _, _ in requested})
+    ids = sorted({tid for tid, _, _, _ in requested})
     qty_by_id: dict[uuid.UUID, int] = {}
     seats_by_id: dict[uuid.UUID, list[uuid.UUID]] = {}
-    for tid, qty, seat_ids in requested:
+    section_by_id: dict[uuid.UUID, uuid.UUID | None] = {}
+    for tid, qty, seat_ids, zone_section_id in requested:
         qty_by_id[tid] = qty_by_id.get(tid, 0) + qty
         if seat_ids:
             seats_by_id.setdefault(tid, []).extend(seat_ids)
+        if zone_section_id:
+            section_by_id[tid] = zone_section_id
 
     ticket_types = (
         db.query(TicketType)
@@ -215,6 +218,24 @@ def create_pending_order(
         db.add(item)
         order_items[t.id] = item
     db.flush()
+
+    # Section requirement: sectioned unassigned types must carry a
+    # section; the claim locks the section row and enforces its own
+    # capacity (heads) — the section-level mirror of the seat holds.
+    required = seats_service.section_required_pool_ids(
+        db, [t.seating_category_id for t in ticket_types if t.seating_category_id]
+    )
+    for t in ticket_types:
+        if t.seating_category_id in required:
+            picked_section = section_by_id.get(t.id)
+            if not picked_section:
+                raise CheckoutError(f'"{t.name}" is sold by section — pick which section you want.')
+            try:
+                seats_service.lock_and_claim_section(
+                    db, ticket_type=t, quantity=qty_by_id[t.id], zone_section_id=picked_section, order_item=order_items[t.id]
+                )
+            except ValueError as exc:
+                raise CheckoutError(str(exc))
 
     # Seat-level holds — the assigned-seat mirror of the quantity hold
     # above, inside the same locked transaction. Conflicts surface as
