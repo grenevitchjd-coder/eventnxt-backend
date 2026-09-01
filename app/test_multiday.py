@@ -144,6 +144,22 @@ def main():
     scan = client.post(f"/events/{EV2}/check-in/{order3['tickets'][0]['code']}", headers=H).json()
     check("undated code admits with no day param", scan["result"] == "admitted", scan)
 
+    # ---- 9. Events360 dates are authoritative ----
+    EV3, EV4 = str(uuid.uuid4()), str(uuid.uuid4())
+    FakeUser.event_data = {"organization_id": ORG_ID, "name": "Fest", "start_date": "2026-10-07", "end_date": "2026-10-09"}
+    r = client.patch(f"/events/{EV3}/settings", json={"ticket_span": "per_day"}, headers=H)
+    check("multi-day event: span alone auto-fills days from Events360",
+          r.status_code == 200 and r.json()["first_day"] == "2026-10-07" and r.json()["last_day"] == "2026-10-09", r.text)
+    FakeUser.event_data = {"organization_id": ORG_ID, "name": "Fest", "start_date": "2026-10-07", "end_date": "2026-10-10"}
+    r = client.get(f"/events/{EV3}/settings", headers=H)
+    check("date change in Events360 self-heals on read", r.json()["last_day"] == "2026-10-10", r.json())
+    FakeUser.event_data = {"organization_id": ORG_ID, "name": "One Night", "start_date": "2026-10-08", "end_date": "2026-10-08"}
+    r = client.patch(f"/events/{EV4}/settings", json={"ticket_span": "multi_day"}, headers=H)
+    check("one-day event refuses multi-day spans", r.status_code == 400 and "one-day" in r.text, r.text)
+    r = client.get(f"/events/{EV4}/settings", headers=H)
+    check("one-day event reads as single_day", r.json()["ticket_span"] == "single_day" and r.json()["first_day"] is None, r.json())
+    FakeUser.event_data = {"organization_id": ORG_ID, "name": "Runway Test", "start_date": None, "end_date": None}
+
     print()
     if failures:
         print("FAILURES:", failures)

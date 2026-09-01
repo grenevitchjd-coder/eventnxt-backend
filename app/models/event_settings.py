@@ -15,7 +15,11 @@ SALES_SOURCES = ("native", "csv", "api")
 COMP_DELIVERIES = ("rsvp_required", "auto_send")
 # Multi-day declarations (slice 1: only ticket_span changes behavior;
 # pricing_mode and seating_mode shape the slice-2 composer).
-TICKET_SPANS = ("single_day", "multi_day", "mixed")
+# single_day = a one-day event (today's behavior, no day machinery).
+# multi_day  = one ticket covers every day (one dated code per day).
+# per_day    = a multi-day event selling tickets day by day (slice 2).
+# mixed      = per-day tickets AND whole-event passes side by side.
+TICKET_SPANS = ("single_day", "multi_day", "per_day", "mixed")
 PRICING_MODES = ("uniform", "per_day")
 SEATING_MODES = ("uniform", "per_day")
 

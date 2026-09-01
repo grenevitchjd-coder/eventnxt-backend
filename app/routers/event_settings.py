@@ -7,6 +7,8 @@ choice. See app/models/event_settings.py for what the three fields mean.
 
 from datetime import date
 
+from dateutil import parser as date_parser
+
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
@@ -50,6 +52,49 @@ def _infer_defaults(db: Session, event_id: str) -> dict:
     return {"ticketing_mode": "native", "sales_source": "native", "comp_delivery": "rsvp_required"}
 
 
+def _event_day_bounds(user: CurrentUser):
+    """
+    The event's (first_day, last_day) as ISO strings, straight from the
+    Events360 payload require_event_access already fetched — the same
+    source the profile caches its dates from. (None, None) when Events360
+    has no dates yet, in which case the manual inputs still work.
+    """
+    data = getattr(user, "event_data", None) or {}
+    try:
+        first = date_parser.isoparse(data["start_date"]).date().isoformat() if data.get("start_date") else None
+        last = date_parser.isoparse(data["end_date"]).date().isoformat() if data.get("end_date") else None
+    except (ValueError, TypeError):
+        return None, None
+    return first, last
+
+
+def _sync_days_from_events360(settings: EventSettings, user: CurrentUser) -> bool:
+    """
+    Events360 is the authority on WHEN the event runs; the span setting
+    only decides how tickets work across those days. One-day events are
+    forced back to single_day span (nothing to configure); multi-day
+    events get first/last kept in step with Events360 so a date change
+    there self-heals here on the next read. Returns whether anything
+    changed (caller commits).
+    """
+    first, last = _event_day_bounds(user)
+    if not (first and last):
+        return False
+    changed = False
+    if first == last:
+        if settings.ticket_span != "single_day" or settings.first_day or settings.last_day:
+            settings.ticket_span = "single_day"
+            settings.first_day = None
+            settings.last_day = None
+            changed = True
+        return changed
+    if settings.first_day != first or settings.last_day != last:
+        settings.first_day = first
+        settings.last_day = last
+        changed = True
+    return changed
+
+
 def _get_or_create(db: Session, event_id: str) -> EventSettings:
     settings = db.query(EventSettings).filter(EventSettings.event_id == event_id).first()
     if settings:
@@ -67,7 +112,11 @@ def get_settings(
     db: Session = Depends(get_db),
     user: CurrentUser = Depends(require_event_access),
 ):
-    return _get_or_create(db, event_id)
+    settings = _get_or_create(db, event_id)
+    if _sync_days_from_events360(settings, user):
+        db.commit()
+        db.refresh(settings)
+    return settings
 
 
 @router.patch("/events/{event_id}/settings", response_model=EventSettingsResponse)
@@ -102,12 +151,21 @@ def update_settings(
             )
 
     settings = _get_or_create(db, event_id)
-    # Cross-field guards evaluated against the MERGED state, so span and
-    # days can arrive in one patch or across two.
+    ev_first, ev_last = _event_day_bounds(user)
+    if ev_first and ev_last and ev_first == ev_last and changes.get("ticket_span") not in (None, "single_day"):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Events360 has this as a one-day event ({ev_first}) — multi-day spans need the event's dates changed there first.",
+        )
+    # Cross-field guards evaluated against the MERGED state — Events360's
+    # dates fill first/last automatically when it knows them, so span and
+    # days can arrive in one patch, across two, or days not at all.
     merged = {
         "ticket_span": changes.get("ticket_span", settings.ticket_span),
-        "first_day": changes.get("first_day", settings.first_day),
-        "last_day": changes.get("last_day", settings.last_day),
+        "first_day": (ev_first if ev_first and ev_last and ev_first != ev_last else None)
+        or changes.get("first_day", settings.first_day),
+        "last_day": (ev_last if ev_first and ev_last and ev_first != ev_last else None)
+        or changes.get("last_day", settings.last_day),
     }
     if merged["first_day"] and merged["last_day"] and merged["first_day"] > merged["last_day"]:
         raise HTTPException(status_code=400, detail="First day must be on or before the last day.")
@@ -118,6 +176,7 @@ def update_settings(
         )
     for field, value in changes.items():
         setattr(settings, field, value)
+    _sync_days_from_events360(settings, user)
     db.commit()
     db.refresh(settings)
     return settings
