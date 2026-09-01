@@ -43,6 +43,7 @@ class TicketTypeAdminResponse(BaseModel):
     sales_end: Optional[datetime] = None
     is_active: bool
     sort_order: int
+    is_pass: bool = False  # derived all-days pass (has member nights)
     # Computed, not stored — see services/ticketing.py availability math.
     sold: int = 0
     held: int = 0

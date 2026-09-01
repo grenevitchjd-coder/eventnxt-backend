@@ -20,7 +20,7 @@ import uuid
 from datetime import datetime, timezone
 
 from fastapi import HTTPException
-from sqlalchemy import func, or_
+from sqlalchemy import tuple_, func, or_
 from sqlalchemy.orm import Session
 
 from app.models.order import Order, OrderStatus
@@ -416,6 +416,69 @@ def lock_and_hold_seats(
     for seat in seats:
         db.add(OrderItemSeat(order_item_id=order_item_id, seat_id=seat.id))
     return seats
+
+
+def lock_and_hold_pass_seats(
+    db: Session, *, pass_type, members, quantity: int, seat_ids: list[uuid.UUID], order_item_id: uuid.UUID
+) -> list[Seat]:
+    """
+    The all-days pass hold: the buyer picked seats from the FIRST
+    member's pool (that's the map the picker serves); each picked seat
+    is a seat IDENTITY — (section, row, number) — that must be claimed
+    in EVERY member pool. All sibling seat rows across all nights are
+    locked FOR UPDATE in one id-ordered set (the same global discipline
+    as every other hold, so a pass buyer racing a single-night buyer for
+    the same chair gets exactly one winner), checked free and unblocked
+    under the lock, then held on the one pass order item. Fulfillment
+    mints one dated code per held seat.
+    """
+    if len(set(seat_ids)) != len(seat_ids):
+        raise ValueError("The same seat was picked twice — each pass needs its own seat.")
+    if len(seat_ids) != quantity:
+        raise ValueError(f'"{pass_type.name}" has {quantity} in your order but {len(seat_ids)} seats picked.')
+
+    pool_ids = [m.seating_category_id for m in members]
+    base_seats = db.query(Seat).filter(Seat.id.in_(seat_ids)).all()
+    if len(base_seats) != len(seat_ids):
+        raise ValueError("One of the picked seats no longer exists — refresh and choose again.")
+    for s in base_seats:
+        if s.seating_category_id != pool_ids[0]:
+            raise ValueError(f'{s.label} doesn\'t belong to "{pass_type.name}".')
+
+    identities = [(s.section_label, s.row_label, s.seat_number) for s in base_seats]
+    all_seats = (
+        db.query(Seat)
+        .filter(
+            Seat.seating_category_id.in_(pool_ids),
+            tuple_(Seat.section_label, Seat.row_label, Seat.seat_number).in_(identities),
+        )
+        .order_by(Seat.id)
+        .with_for_update()
+        .all()
+    )
+    # Every identity must exist on every night — layouts that diverged
+    # after the pass was created narrow what the pass can sell.
+    by_pool: dict = {}
+    for s in all_seats:
+        by_pool.setdefault(s.seating_category_id, []).append(s)
+    for m in members:
+        found = by_pool.get(m.seating_category_id, [])
+        if len(found) != len(identities):
+            raise ValueError(
+                f'One of those seats doesn\'t exist on every night of "{pass_type.name}" — the layouts differ. Pick another seat.'
+            )
+        for s in found:
+            if s.is_blocked:
+                raise ValueError(f"{s.label} isn't available for sale on one of the nights.")
+
+    conflicts = taken_seat_ids(db, [s.id for s in all_seats])
+    if conflicts:
+        victim = next(s for s in all_seats if s.id in conflicts)
+        raise ValueError(f"{victim.label} was just taken on one of the nights — pick another seat.")
+
+    for s in all_seats:
+        db.add(OrderItemSeat(order_item_id=order_item_id, seat_id=s.id))
+    return all_seats
 
 
 def seats_for_order_item(db: Session, order_item_id: uuid.UUID) -> list[Seat]:

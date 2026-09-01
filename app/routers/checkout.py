@@ -97,6 +97,7 @@ def list_public_ticket_types(slug: str, db: Session = Depends(get_db)):
                     remaining=max(sec.capacity - seats_service.section_heads_taken(db, sec.id), 0),
                 )
             )
+    pass_ids = set(ticketing.pass_members_for(db, [t.id for t in ticket_types]).keys())
     return [
         PublicTicketTypeResponse(
             id=t.id,
@@ -107,7 +108,7 @@ def list_public_ticket_types(slug: str, db: Session = Depends(get_db)):
             max_per_order=t.max_per_order,
             admits=t.admits or 1,
             valid_date=t.valid_date,
-            assigned_seating=t.seating_category_id in assigned_pool_ids,
+            assigned_seating=(t.seating_category_id in assigned_pool_ids) or (t.id in pass_ids),
             section_required=t.seating_category_id in section_pool_ids,
             sections=sections_by_pool.get(t.seating_category_id, []),
             available=avail[t.id]["available"],
@@ -131,7 +132,57 @@ def public_seat_map(slug: str, ticket_type_id: uuid.UUID, db: Session = Depends(
         .filter(TicketType.id == ticket_type_id, TicketType.event_id == profile.event_id)
         .first()
     )
-    if not tt or not tt.seating_category_id:
+    if not tt:
+        raise HTTPException(status_code=404, detail="Ticket type not found.")
+    members = ticketing.pass_members_for(db, [tt.id]).get(tt.id)
+    if members:
+        # Derived pass: the map is the FIRST night's seats, and a seat is
+        # available only when its identity is free (not taken, not
+        # blocked) on EVERY night. Serving night-1 seat ids keeps the
+        # picker unchanged — checkout resolves siblings server-side.
+        pool_ids = [m.seating_category_id for m in members]
+        all_seats = (
+            db.query(Seat)
+            .filter(Seat.seating_category_id.in_(pool_ids))
+            .order_by(Seat.section_label, Seat.row_label, Seat.seat_number)
+            .all()
+        )
+        taken = seats_service.taken_seat_ids(db, [s.id for s in all_seats])
+        free_identities_per_pool = {}
+        counts = {}
+        for s in all_seats:
+            ident = (s.section_label, s.row_label, s.seat_number)
+            counts[ident] = counts.get(ident, 0) + 1
+            if s.id not in taken and not s.is_blocked:
+                free_identities_per_pool[ident] = free_identities_per_pool.get(ident, 0) + 1
+        n = len(pool_ids)
+        grouped = {}
+        for s in all_seats:
+            if s.seating_category_id != pool_ids[0]:
+                continue
+            grouped.setdefault((s.section_label, s.row_label), []).append(s)
+        return PublicSeatMapResponse(
+            ticket_type_id=tt.id,
+            sections=[
+                PublicSeatSectionResponse(
+                    section_label=sec,
+                    row_label=row,
+                    seats=[
+                        PublicSeatResponse(
+                            id=x.id,
+                            seat_number=x.seat_number,
+                            available=(
+                                counts.get((x.section_label, x.row_label, x.seat_number), 0) == n
+                                and free_identities_per_pool.get((x.section_label, x.row_label, x.seat_number), 0) == n
+                            ),
+                        )
+                        for x in xs
+                    ],
+                )
+                for (sec, row), xs in grouped.items()
+            ],
+        )
+    if not tt.seating_category_id:
         raise HTTPException(status_code=404, detail="Ticket type not found.")
     seats = (
         db.query(Seat)

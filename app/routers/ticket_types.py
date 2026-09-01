@@ -5,6 +5,10 @@ from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app.models.order_item import OrderItem
+from pydantic import BaseModel, Field
+from typing import Optional
+
+from app.models.pass_member import PassMember
 from app.models.seating_category import SeatingCategory
 from app.models.ticket_type import TicketType
 from app.models.zone_section import ZoneSection
@@ -21,10 +25,16 @@ router = APIRouter(tags=["ticket-types"])
 def _with_counts(db: Session, ticket_types: list[TicketType]) -> list[TicketTypeAdminResponse]:
     avail = availability_for(db, ticket_types) if ticket_types else {}
     out = []
+    pass_ids = {
+        pid for (pid,) in db.query(PassMember.pass_type_id)
+        .filter(PassMember.pass_type_id.in_([t.id for t in ticket_types]))
+        .all()
+    } if ticket_types else set()
     for t in ticket_types:
         resp = TicketTypeAdminResponse.model_validate(t)
         c = avail[t.id]
         resp.sold, resp.held, resp.available = c["sold"], c["held"], c["available"]
+        resp.is_pass = t.id in pass_ids
         out.append(resp)
     return out
 
@@ -151,6 +161,9 @@ def delete_ticket_type(
     )
     if not ticket_type:
         raise HTTPException(status_code=404, detail="Ticket type not found.")
+    if db.query(PassMember.id).filter(PassMember.member_type_id == ticket_type_id).first():
+        raise HTTPException(status_code=400, detail="This night is part of an all-days pass — delete the pass first.")
+    db.query(PassMember).filter(PassMember.pass_type_id == ticket_type_id).delete()
 
     has_orders = db.query(OrderItem).filter(OrderItem.ticket_type_id == ticket_type.id).first()
     if has_orders:
@@ -269,3 +282,86 @@ def fan_out_ticket_type(
     for c in created:
         db.refresh(c)
     return _with_counts(db, created) if created else []
+
+class PassCreateRequest(BaseModel):
+    name: str
+    price_cents: int = Field(ge=0)
+    quantity: int = Field(ge=1)  # the pass's own cap — how many packages to sell
+    max_per_order: int = Field(default=4, ge=1)
+
+
+@router.post("/events/{event_id}/ticket-types/{ticket_type_id}/pass", response_model=TicketTypeAdminResponse, status_code=201)
+def create_pass_from_type(
+    event_id: str,
+    ticket_type_id: str,
+    payload: PassCreateRequest,
+    db: Session = Depends(get_db),
+    user: CurrentUser = Depends(require_event_access),
+):
+    """
+    Derived all-days pass: a whole-event type linked to every night of a
+    seated family (same-named dated types with assigned seats — the
+    fan-out shape). It owns no seats; buying it claims the same seat
+    identity in every night's pool at the pass's one price. Availability
+    is physical (the seats themselves) plus the pass's own quantity cap.
+    v1 is assigned-seat families only — GA/row all-days products are the
+    standalone package path.
+    """
+    row = get_event_settings_row(db, event_id)
+    if not row or row.ticket_span != "mixed":
+        raise HTTPException(status_code=400, detail="All-days passes need the event span set to mixed (Event settings).")
+    template = (
+        db.query(TicketType)
+        .filter(TicketType.id == ticket_type_id, TicketType.event_id == event_id)
+        .first()
+    )
+    if not template or not template.valid_date:
+        raise HTTPException(status_code=404, detail="Pass templates are day-specific ticket types.")
+    family = (
+        db.query(TicketType)
+        .filter(TicketType.event_id == event_id, TicketType.name == template.name, TicketType.valid_date.isnot(None))
+        .order_by(TicketType.valid_date)
+        .all()
+    )
+    if len({m.valid_date for m in family}) < 2:
+        raise HTTPException(status_code=400, detail=f'"{template.name}" only exists for one day — fan it out first.')
+    pools = (
+        db.query(SeatingCategory).filter(SeatingCategory.id.in_([m.seating_category_id for m in family if m.seating_category_id])).all()
+    )
+    if len(pools) != len(family) or any(p.sales_grain != "seat" for p in pools):
+        raise HTTPException(
+            status_code=400,
+            detail="All-days passes currently cover assigned-seat families — for GA or row packages, create a whole-event type instead.",
+        )
+    already = (
+        db.query(PassMember.id)
+        .join(TicketType, TicketType.id == PassMember.pass_type_id)
+        .filter(PassMember.member_type_id.in_([m.id for m in family]), TicketType.is_active.is_(True))
+        .first()
+    )
+    if already:
+        raise HTTPException(status_code=400, detail=f'"{template.name}" already has an active all-days pass.')
+
+    pass_type = TicketType(
+        event_id=event_id,
+        organization_id=template.organization_id,
+        seating_category_id=None,
+        name=payload.name.strip() or f"{template.name} — All Days",
+        description=None,
+        price_cents=payload.price_cents,
+        quantity=payload.quantity,
+        max_per_order=payload.max_per_order,
+        admits=1,
+        valid_date=None,
+        sales_start=None,
+        sales_end=None,
+        is_active=True,
+        sort_order=template.sort_order,
+    )
+    db.add(pass_type)
+    db.flush()
+    for m in family:
+        db.add(PassMember(pass_type_id=pass_type.id, member_type_id=m.id))
+    db.commit()
+    db.refresh(pass_type)
+    return _with_counts(db, [pass_type])[0]

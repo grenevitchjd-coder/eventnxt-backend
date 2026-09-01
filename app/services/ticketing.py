@@ -128,6 +128,25 @@ def is_on_sale(t: TicketType, available: int) -> bool:
     return True
 
 
+def pass_members_for(db: Session, ticket_type_ids: list) -> dict:
+    """pass_type_id -> ordered member TicketTypes (by valid_date). Empty
+    dict when none of the ids are passes."""
+    from app.models.pass_member import PassMember
+
+    rows = (
+        db.query(PassMember.pass_type_id, TicketType)
+        .join(TicketType, TicketType.id == PassMember.member_type_id)
+        .filter(PassMember.pass_type_id.in_(ticket_type_ids))
+        .all()
+    )
+    out: dict = {}
+    for pid, member in rows:
+        out.setdefault(pid, []).append(member)
+    for pid in out:
+        out[pid].sort(key=lambda m: m.valid_date or "")
+    return out
+
+
 def create_pending_order(
     db: Session,
     event_id: uuid.UUID,
@@ -239,15 +258,25 @@ def create_pending_order(
 
     # Seat-level holds — the assigned-seat mirror of the quantity hold
     # above, inside the same locked transaction. Conflicts surface as
-    # buyer-readable CheckoutErrors.
+    # buyer-readable CheckoutErrors. Pass types hold the same seat
+    # identity across every member night instead of one pool.
+    pass_map = pass_members_for(db, [t.id for t in ticket_types])
     for t in ticket_types:
         picked = seats_by_id.get(t.id)
         if not picked:
+            if t.id in pass_map:
+                raise CheckoutError(f'"{t.name}" is seat-picked — choose your seat for all nights.')
             continue
         try:
-            seats_service.lock_and_hold_seats(
-                db, ticket_type=t, quantity=qty_by_id[t.id], seat_ids=picked, order_item_id=order_items[t.id].id
-            )
+            if t.id in pass_map:
+                seats_service.lock_and_hold_pass_seats(
+                    db, pass_type=t, members=pass_map[t.id], quantity=qty_by_id[t.id],
+                    seat_ids=picked, order_item_id=order_items[t.id].id,
+                )
+            else:
+                seats_service.lock_and_hold_seats(
+                    db, ticket_type=t, quantity=qty_by_id[t.id], seat_ids=picked, order_item_id=order_items[t.id].id
+                )
         except ValueError as exc:
             raise CheckoutError(str(exc))
     db.flush()
@@ -283,8 +312,28 @@ def fulfill_paid_order(db: Session, order: Order) -> list[Ticket]:
 
     event_days = event_days_for(db, order.event_id)
     tickets: list[Ticket] = []
+    pass_map = pass_members_for(db, [i.ticket_type_id for i in items])
     for item in items:
         tt = tts_by_id.get(item.ticket_type_id)
+        if item.ticket_type_id in pass_map:
+            # Derived pass: one code per held seat, dated to the night
+            # whose pool that seat lives in — the buyer keeps the same
+            # chair every night, three dated QRs in one email.
+            date_by_pool = {m.seating_category_id: m.valid_date for m in pass_map[item.ticket_type_id]}
+            for seat in seats_service.seats_for_order_item(db, item.id):
+                ticket = Ticket(
+                    order_id=order.id,
+                    order_item_id=item.id,
+                    ticket_type_id=item.ticket_type_id,
+                    event_id=order.event_id,
+                    code=generate_ticket_code(),
+                    status=TicketStatus.VALID,
+                    seat_id=seat.id,
+                    valid_date=date_by_pool.get(seat.seating_category_id),
+                )
+                db.add(ticket)
+                tickets.append(ticket)
+            continue
         if tt is not None and tt.valid_date:
             dates = [tt.valid_date]
         elif event_days:
