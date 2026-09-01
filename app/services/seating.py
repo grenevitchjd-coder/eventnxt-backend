@@ -50,10 +50,85 @@ def check_capacity(db: Session, event_id: str, category_id: str, party_size: int
 
 
 def resolve_seating_from_priorities(db: Session, event_id: str, guest_type_id: str, party_size: int = 1):
+    """Pool-only view of resolve_seating_placement, kept for call sites
+    that only store a category (redemptions, request approval)."""
+    category_id, _section = resolve_seating_placement(db, event_id, guest_type_id, party_size=party_size)
+    return category_id
+
+
+def section_room_for_comps(db: Session, category: SeatingCategory, section_label: str, exclude_guest_id=None) -> int:
     """
-    Walks the guest type's ORDERED seating priority list and returns the
-    first category id with room for `party_size` more seats, or None
-    (either no priorities are configured, or none has enough room).
+    How many more comp heads fit in one section of a pool. The section's
+    capacity minus box-office heads (paid/pending-unexpired) minus comp
+    heads already placed in this section. For assigned-seat pools the
+    box-office+reserved side is counted through the seats themselves
+    (free, unblocked seats), minus seatless comp heads placed here —
+    guests holding actual seats consume via their blocked seats, so
+    they're never double-counted.
+
+    Matching is by LABEL (all sections of the pool sharing the label sum
+    together); a label that no longer exists yields 0 room and the
+    resolver falls through to the next priority.
+    """
+    from app.models.zone_section import ZoneSection
+    from app.services import seats as seats_service
+
+    sections = (
+        db.query(ZoneSection)
+        .filter(ZoneSection.seating_category_id == category.id, ZoneSection.section_label == section_label)
+        .all()
+    )
+    if not sections:
+        return 0
+
+    comp_q = db.query(func.coalesce(func.sum(Guest.party_size), 0)).filter(
+        Guest.seating_category_id == category.id,
+        Guest.section_label == section_label,
+        Guest.allocation_status == GuestAllocationStatus.CONFIRMED,
+    )
+    if exclude_guest_id:
+        comp_q = comp_q.filter(Guest.id != exclude_guest_id)
+    comp_heads_here = comp_q.scalar() or 0
+
+    if category.sales_grain == "seat":
+        from app.models.seat import Seat
+
+        seats = (
+            db.query(Seat)
+            .filter(Seat.seating_category_id == category.id, Seat.section_label == section_label)
+            .all()
+        )
+        if not seats:
+            return 0
+        taken = seats_service.taken_seat_ids(db, [s.id for s in seats])
+        free = sum(1 for s in seats if s.id not in taken and not s.is_blocked)
+        # Seat-holding guests are inside `blocked`; only seatless comps
+        # placed in this section still draw from the free count.
+        seated_guest_ids = {s.guest_id for s in seats if s.guest_id}
+        seatless_q = db.query(func.coalesce(func.sum(Guest.party_size), 0)).filter(
+            Guest.seating_category_id == category.id,
+            Guest.section_label == section_label,
+            Guest.allocation_status == GuestAllocationStatus.CONFIRMED,
+        )
+        if seated_guest_ids:
+            seatless_q = seatless_q.filter(~Guest.id.in_(seated_guest_ids))
+        if exclude_guest_id:
+            seatless_q = seatless_q.filter(Guest.id != exclude_guest_id)
+        seatless_comp_heads = seatless_q.scalar() or 0
+        return max(free - seatless_comp_heads, 0)
+
+    capacity = sum(sec.capacity for sec in sections)
+    box_office = sum(seats_service.section_heads_taken(db, sec.id) for sec in sections)
+    return max(capacity - box_office - comp_heads_here, 0)
+
+
+def resolve_seating_placement(db: Session, event_id: str, guest_type_id: str, party_size: int = 1):
+    """
+    Walks the guest type's ORDERED priority list and returns
+    (category_id, section_label) for the first entry with room for
+    `party_size`, or (None, None). section_label is None when a
+    pool-level entry wins — the guest floats at pool level exactly as
+    before Slice C.
 
     Deadlock safety: a guest creation may need to lock several categories
     in one transaction. If we locked them in PRIORITY order, two
@@ -64,8 +139,13 @@ def resolve_seating_from_priorities(db: Session, event_id: str, guest_type_id: s
     deterministic order (by id) regardless of priority — since every
     transaction acquires locks in that identical sequence, a circular
     wait, and therefore a deadlock, can never form. The actual business
-    decision (which category to pick) is made afterward, using the
-    already-locked data, walking the REAL priority order.
+    decision is made afterward, using the already-locked data, walking
+    the REAL priority order. Section-level entries are guarded by the
+    same pool lock: every comp-placement path locks the pool row, so two
+    comps can't both take a section's last head. (A comp racing a BUYER
+    for the last head of a section is the same estimated-vs-confirmed
+    exposure comps have always had at pool level — the reconciliation
+    summary is the source of truth there.)
     """
     priorities = (
         db.query(GuestTypeSeatingPriority)
@@ -74,9 +154,9 @@ def resolve_seating_from_priorities(db: Session, event_id: str, guest_type_id: s
         .all()
     )
     if not priorities:
-        return None
+        return None, None
 
-    category_ids = [p.seating_category_id for p in priorities]
+    category_ids = list({p.seating_category_id for p in priorities})
 
     locked_categories = (
         db.query(SeatingCategory)
@@ -91,6 +171,10 @@ def resolve_seating_from_priorities(db: Session, event_id: str, guest_type_id: s
         category = categories_by_id.get(p.seating_category_id)
         if not category:
             continue
+        if p.section_label:
+            if section_room_for_comps(db, category, p.section_label) >= party_size:
+                return category.id, p.section_label
+            continue
         confirmed_total = (
             db.query(func.coalesce(func.sum(Guest.party_size), 0))
             .filter(
@@ -101,9 +185,9 @@ def resolve_seating_from_priorities(db: Session, event_id: str, guest_type_id: s
             or 0
         )
         if confirmed_total + party_size <= category.capacity:
-            return category.id
+            return category.id, None
 
-    return None
+    return None, None
 
 
 def has_seating_priorities(db: Session, guest_type_id: str) -> bool:
@@ -217,3 +301,41 @@ def check_allotment_capacity_per_day(
                 status_code=400,
                 detail=f"Only {remaining} ticket(s) remaining for {date} — tried to allocate {requested_qty}.",
             )
+
+def check_section_capacity(
+    db: Session, event_id: str, category_id: str, section_label: str, party_size: int = 1, exclude_guest_id=None
+):
+    """
+    Organizer explicitly placing a confirmed guest into a section: lock
+    the pool row (same lock every comp path takes), verify the label
+    exists, verify the section has room. Called AFTER check_capacity in
+    the routers, so the pool row is already locked in this transaction —
+    the extra with_for_update here is a no-op re-acquire, kept so this
+    function is safe to call alone too.
+    """
+    category = (
+        db.query(SeatingCategory)
+        .filter(SeatingCategory.id == category_id, SeatingCategory.event_id == event_id)
+        .with_for_update()
+        .first()
+    )
+    if not category:
+        raise HTTPException(status_code=404, detail="Seating category not found for this event.")
+    from app.models.zone_section import ZoneSection
+
+    exists = (
+        db.query(ZoneSection.id)
+        .filter(ZoneSection.seating_category_id == category.id, ZoneSection.section_label == section_label)
+        .first()
+    )
+    if not exists:
+        raise HTTPException(
+            status_code=400,
+            detail=f'"{category.name}" has no section "{section_label}" — pick one of its sections or leave section blank.',
+        )
+    room = section_room_for_comps(db, category, section_label, exclude_guest_id=exclude_guest_id)
+    if room < party_size:
+        raise HTTPException(
+            status_code=400,
+            detail=f'Section {section_label} of "{category.name}" only has {room} seat(s) left — not enough for {party_size}.',
+        )

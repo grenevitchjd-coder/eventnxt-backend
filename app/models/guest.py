@@ -60,6 +60,10 @@ class Guest(Base):
     guest_type_id = Column(UUID(as_uuid=True), ForeignKey("guest_types.id"), nullable=False)
     # Nullable: a guest type may have no seating category assigned yet.
     seating_category_id = Column(UUID(as_uuid=True), ForeignKey("seating_categories.id"), nullable=True)
+    # Which section within their pool this comp guest was placed in
+    # (resolver or organizer). A label, not an FK — see the priority
+    # model. NULL = floats at pool level (every pre-0031 comp).
+    section_label = Column(String, nullable=True)
 
     allocation_status = Column(
         SAEnum(

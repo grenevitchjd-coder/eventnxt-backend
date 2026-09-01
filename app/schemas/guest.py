@@ -16,6 +16,7 @@ class GuestCreateRequest(BaseModel):
     email: EmailStr
     guest_type_id: uuid.UUID
     seating_category_id: Optional[uuid.UUID] = None
+    section_label: Optional[str] = None  # section within the pool; needs seating_category_id
     allocation_status: Literal["confirmed", "pending", "declined"] = "confirmed"
     party_size: int = Field(default=1, ge=1)
     visit_date: Optional[str] = None
@@ -30,6 +31,7 @@ class GuestUpdateRequest(BaseModel):
     email: EmailStr
     guest_type_id: uuid.UUID
     seating_category_id: Optional[uuid.UUID] = None
+    section_label: Optional[str] = None
     allocation_status: Literal["confirmed", "pending", "declined"] = "confirmed"
     party_size: int = Field(default=1, ge=1)
     visit_date: Optional[str] = None
@@ -46,6 +48,7 @@ class GuestResponse(BaseModel):
     email: str
     guest_type_id: uuid.UUID
     seating_category_id: Optional[uuid.UUID] = None
+    section_label: Optional[str] = None
     allocation_status: str
     party_size: int
     perks: Optional[str] = None

@@ -138,9 +138,12 @@ def send_comp_ticket_email(db: Session, guest: Guest, tickets: list[Ticket]) -> 
     when = f"\nDate: {guest.visit_date}" if guest.visit_date else ""
     page = f"\nEvent page: {app_settings.eventnxt_frontend_url}/e/{profile.slug}" if profile and profile.is_published else ""
 
+    section_note = (
+        f"\nSeating: Section {guest.section_label}" if guest.section_label and not seat_ids else ""
+    )
     text = (
         f"Hi {guest.name},\n\n"
-        f"You're confirmed for {event_name}.{when}\n\n"
+        f"You're confirmed for {event_name}.{when}{section_note}\n\n"
         f"Your admission code{plural} — show at the door:\n{codes}\n"
         f"{page}\n\n"
         f"See you there!"
@@ -158,7 +161,8 @@ def send_comp_ticket_email(db: Session, guest: Guest, tickets: list[Ticket]) -> 
     )
     html = (
         f"<p>Hi {guest.name},</p>"
-        f"<p>You're confirmed for <strong>{event_name}</strong>.{(' Date: ' + str(guest.visit_date)) if guest.visit_date else ''}</p>"
+        f"<p>You're confirmed for <strong>{event_name}</strong>.{(' Date: ' + str(guest.visit_date)) if guest.visit_date else ''}"
+        f"{(' Seating: Section ' + guest.section_label + '.') if guest.section_label and not seat_ids else ''}</p>"
         f"<p>Your admission code{plural} — show at the door (scannable or typed):</p>"
         f"<table>{code_cells}</table>"
         f"<p>See you there!</p>"

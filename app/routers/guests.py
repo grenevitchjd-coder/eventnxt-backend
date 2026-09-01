@@ -46,6 +46,7 @@ def _serialize_guest(db: Session, guest: Guest) -> GuestResponse:
         email=guest.email,
         guest_type_id=guest.guest_type_id,
         seating_category_id=guest.seating_category_id,
+        section_label=guest.section_label,
         allocation_status=guest.allocation_status.value,
         party_size=guest.party_size,
         perks=guest.perks,
@@ -80,10 +81,12 @@ def create_guest(
     if not guest_type or str(guest_type.event_id) != event_id:
         raise HTTPException(status_code=404, detail="Guest type not found for this event.")
 
+    effective_section_label = None
     if payload.seating_category_id:
         # Explicit override — use it directly, same single-category check
         # as before, regardless of what the guest type's priority list says.
         effective_seating_category_id = payload.seating_category_id
+        effective_section_label = (payload.section_label or "").strip() or None
         if payload.allocation_status == "confirmed":
             seating.check_capacity(db, event_id, effective_seating_category_id, party_size=payload.party_size)
         else:
@@ -94,11 +97,19 @@ def create_guest(
             )
             if not category:
                 raise HTTPException(status_code=404, detail="Seating category not found for this event.")
+        if effective_section_label:
+            # Section-level hand placement: verify the label and its room
+            # (only bites for confirmed guests — pending holds nothing).
+            if payload.allocation_status == "confirmed":
+                seating.check_section_capacity(
+                    db, event_id, payload.seating_category_id, effective_section_label,
+                    party_size=payload.party_size,
+                )
 
     elif payload.allocation_status == "confirmed":
         # Nothing explicit — walk the guest type's priority list for the
         # first category with enough room.
-        effective_seating_category_id = seating.resolve_seating_from_priorities(
+        effective_seating_category_id, effective_section_label = seating.resolve_seating_placement(
             db, event_id, payload.guest_type_id, party_size=payload.party_size
         )
         if effective_seating_category_id is None:
@@ -128,6 +139,7 @@ def create_guest(
         email=payload.email,
         guest_type_id=payload.guest_type_id,
         seating_category_id=effective_seating_category_id,
+        section_label=effective_section_label,
         allocation_status=GuestAllocationStatus(payload.allocation_status),
         party_size=payload.party_size,
         visit_date=payload.visit_date,
@@ -202,6 +214,7 @@ def update_guest(
         and str(guest.seating_category_id) == str(payload.seating_category_id)
         and guest.party_size == payload.party_size
     )
+    new_section_label = (payload.section_label or "").strip() or None
     if payload.seating_category_id and payload.allocation_status == "confirmed" and not already_confirmed_here:
         seating.check_capacity(
             db, event_id, payload.seating_category_id, party_size=payload.party_size, exclude_guest_id=guest.id
@@ -215,10 +228,21 @@ def update_guest(
         if not category:
             raise HTTPException(status_code=404, detail="Seating category not found for this event.")
 
+    if payload.seating_category_id and new_section_label and payload.allocation_status == "confirmed":
+        section_unchanged = (
+            already_confirmed_here and (guest.section_label or None) == new_section_label
+        )
+        if not section_unchanged:
+            seating.check_section_capacity(
+                db, event_id, payload.seating_category_id, new_section_label,
+                party_size=payload.party_size, exclude_guest_id=guest.id,
+            )
+
     guest.name = payload.name
     guest.email = payload.email
     guest.guest_type_id = payload.guest_type_id
     guest.seating_category_id = payload.seating_category_id
+    guest.section_label = new_section_label if payload.seating_category_id else None
     guest.allocation_status = GuestAllocationStatus(payload.allocation_status)
     guest.party_size = payload.party_size
     guest.visit_date = payload.visit_date

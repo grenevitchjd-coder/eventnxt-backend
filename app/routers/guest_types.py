@@ -144,6 +144,24 @@ def add_seating_priority(
     if not category:
         raise HTTPException(status_code=404, detail="That seating category doesn't belong to this event.")
 
+    section_label = (payload.section_label or "").strip() or None
+    if section_label:
+        from app.models.zone_section import ZoneSection
+
+        exists = (
+            db.query(ZoneSection.id)
+            .filter(
+                ZoneSection.seating_category_id == category.id,
+                ZoneSection.section_label == section_label,
+            )
+            .first()
+        )
+        if not exists:
+            raise HTTPException(
+                status_code=400,
+                detail=f'"{category.name}" has no section "{section_label}".',
+            )
+
     existing_count = (
         db.query(GuestTypeSeatingPriority)
         .filter(GuestTypeSeatingPriority.guest_type_id == guest_type_id)
@@ -152,6 +170,7 @@ def add_seating_priority(
     priority = GuestTypeSeatingPriority(
         guest_type_id=guest_type_id,
         seating_category_id=payload.seating_category_id,
+        section_label=section_label,
         priority_order=existing_count,
     )
     db.add(priority)

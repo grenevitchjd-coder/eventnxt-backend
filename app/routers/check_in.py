@@ -69,6 +69,10 @@ def _describe(db: Session, ticket: Ticket) -> dict:
         if ticket.seat_id:
             seat = db.query(Seat).filter(Seat.id == ticket.seat_id).first()
             comp_seat_label = seat.label if seat else None
+        if not comp_seat_label and guest and guest.section_label:
+            # Section-placed comp with no specific seat: the door still
+            # gets a destination.
+            comp_seat_label = f"Section {guest.section_label}"
         out.update(
             kind="comp",
             name=guest.name if guest else None,

@@ -1,5 +1,6 @@
 # eventnxt-backend: app/schemas/guest_type.py
 import uuid
+from typing import Optional
 from datetime import datetime
 
 from pydantic import BaseModel, Field
@@ -31,6 +32,8 @@ class GuestTypeResponse(BaseModel):
 
 class GuestTypeSeatingPriorityCreateRequest(BaseModel):
     seating_category_id: uuid.UUID
+    # None = the whole pool; a label = only that section of the pool.
+    section_label: Optional[str] = None
     # priority_order is NOT accepted here — new entries always append to the
     # end of the list (auto-computed server-side). To reorder, remove and
     # re-add in the desired sequence.
@@ -39,6 +42,7 @@ class GuestTypeSeatingPriorityCreateRequest(BaseModel):
 class GuestTypeSeatingPriorityResponse(BaseModel):
     id: uuid.UUID
     seating_category_id: uuid.UUID
+    section_label: Optional[str] = None
     priority_order: int
 
     class Config:

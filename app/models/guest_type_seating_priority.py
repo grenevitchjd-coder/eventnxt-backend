@@ -1,6 +1,6 @@
 import uuid
 
-from sqlalchemy import Column, Integer, DateTime, ForeignKey
+from sqlalchemy import Column, Integer, DateTime, ForeignKey, String
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.sql import func
 
@@ -23,4 +23,10 @@ class GuestTypeSeatingPriority(Base):
     guest_type_id = Column(UUID(as_uuid=True), ForeignKey("guest_types.id"), nullable=False)
     seating_category_id = Column(UUID(as_uuid=True), ForeignKey("seating_categories.id"), nullable=False)
     priority_order = Column(Integer, nullable=False)  # 0 = highest priority (tried first)
+    # NULL = the whole pool; a label = only that section of the pool.
+    # A LABEL, not a zone_sections FK — sections are replaced wholesale
+    # on every structure save, so labels are the durable identity (same
+    # philosophy as seats). Labels that stop existing are skipped by the
+    # resolver.
+    section_label = Column(String, nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())

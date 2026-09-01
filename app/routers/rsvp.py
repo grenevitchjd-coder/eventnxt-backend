@@ -198,7 +198,7 @@ def respond_to_rsvp(token: str, payload: RSVPRespondRequest, db: Session = Depen
                 )
             guest.visit_date = payload.visit_date
 
-        new_category_id = seating.resolve_seating_from_priorities(
+        new_category_id, new_section_label = seating.resolve_seating_placement(
             db, str(guest.event_id), str(guest.guest_type_id), party_size=guest.party_size
         )
         # Hand-placed guests (organizer assigned them specific reserved
@@ -224,6 +224,7 @@ def respond_to_rsvp(token: str, payload: RSVPRespondRequest, db: Session = Depen
             guest.needs_seating = True
         else:
             guest.seating_category_id = new_category_id
+            guest.section_label = new_section_label
             guest.allocation_status = GuestAllocationStatus.CONFIRMED
             guest.rsvp_confirmed = "yes"
             guest.needs_seating = False
@@ -241,6 +242,7 @@ def respond_to_rsvp(token: str, payload: RSVPRespondRequest, db: Session = Depen
         guest.needs_seating = False
         # A declined guest releases their seat back to the pool.
         guest.seating_category_id = None
+        guest.section_label = None
         # ...and any hand-assigned seats release from the guest but STAY
         # reserved, ready to hand to someone else.
         from app.services import seats as seats_service
