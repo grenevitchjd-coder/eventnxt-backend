@@ -13,6 +13,11 @@ from app.database import Base
 TICKETING_MODES = ("native", "external", "invite_only")
 SALES_SOURCES = ("native", "csv", "api")
 COMP_DELIVERIES = ("rsvp_required", "auto_send")
+# Multi-day declarations (slice 1: only ticket_span changes behavior;
+# pricing_mode and seating_mode shape the slice-2 composer).
+TICKET_SPANS = ("single_day", "multi_day", "mixed")
+PRICING_MODES = ("uniform", "per_day")
+SEATING_MODES = ("uniform", "per_day")
 
 
 class EventSettings(Base):
@@ -50,6 +55,15 @@ class EventSettings(Base):
     ticketing_mode = Column(String, nullable=False, default="native")
     sales_source = Column(String, nullable=False, default="native")
     comp_delivery = Column(String, nullable=False, default="rsvp_required")
+
+    # Multi-day: span decides whether whole-event purchases fan out to
+    # one dated code per event day; first/last day (ISO strings, same
+    # dialect as guests.visit_date) define the day list.
+    ticket_span = Column(String, nullable=False, default="single_day")
+    pricing_mode = Column(String, nullable=False, default="uniform")
+    seating_mode = Column(String, nullable=False, default="uniform")
+    first_day = Column(String, nullable=True)
+    last_day = Column(String, nullable=True)
 
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)

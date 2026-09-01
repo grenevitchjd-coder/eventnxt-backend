@@ -5,6 +5,8 @@ never chose (so shipping this changes nothing), PATCH records an explicit
 choice. See app/models/event_settings.py for what the three fields mean.
 """
 
+from datetime import date
+
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
@@ -12,8 +14,11 @@ from app.database import get_db
 from app.models.event_profile import EventProfile
 from app.models.event_settings import (
     COMP_DELIVERIES,
+    PRICING_MODES,
     SALES_SOURCES,
+    SEATING_MODES,
     TICKETING_MODES,
+    TICKET_SPANS,
     EventSettings,
 )
 from app.models.ticket_type import TicketType
@@ -76,11 +81,20 @@ def update_settings(
         "ticketing_mode": TICKETING_MODES,
         "sales_source": SALES_SOURCES,
         "comp_delivery": COMP_DELIVERIES,
+        "ticket_span": TICKET_SPANS,
+        "pricing_mode": PRICING_MODES,
+        "seating_mode": SEATING_MODES,
     }
     changes = payload.model_dump(exclude_unset=True, exclude_none=True)
     if not changes:
         raise HTTPException(status_code=400, detail="Nothing to update.")
     for field, value in changes.items():
+        if field in ("first_day", "last_day"):
+            try:
+                date.fromisoformat(value)
+            except ValueError:
+                raise HTTPException(status_code=400, detail=f'"{value}" isn\'t a date (use YYYY-MM-DD).')
+            continue
         if value not in allowed[field]:
             raise HTTPException(
                 status_code=400,
@@ -88,6 +102,20 @@ def update_settings(
             )
 
     settings = _get_or_create(db, event_id)
+    # Cross-field guards evaluated against the MERGED state, so span and
+    # days can arrive in one patch or across two.
+    merged = {
+        "ticket_span": changes.get("ticket_span", settings.ticket_span),
+        "first_day": changes.get("first_day", settings.first_day),
+        "last_day": changes.get("last_day", settings.last_day),
+    }
+    if merged["first_day"] and merged["last_day"] and merged["first_day"] > merged["last_day"]:
+        raise HTTPException(status_code=400, detail="First day must be on or before the last day.")
+    if merged["ticket_span"] != "single_day" and not (merged["first_day"] and merged["last_day"]):
+        raise HTTPException(
+            status_code=400,
+            detail="Multi-day and mixed spans need the event's first and last day set (so tickets know their dates).",
+        )
     for field, value in changes.items():
         setattr(settings, field, value)
     db.commit()

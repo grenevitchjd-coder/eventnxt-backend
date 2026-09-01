@@ -36,8 +36,9 @@ router = APIRouter(prefix="/events/{event_id}/check-in", tags=["check-in"])
 
 
 class CheckInResult(BaseModel):
-    result: str  # 'admitted' | 'already_checked_in' | 'refunded' | 'not_found'
+    result: str  # 'admitted' | 'already_checked_in' | 'refunded' | 'wrong_day' | 'not_found'
     code: str
+    valid_date: Optional[str] = None  # the day a dated code admits on
     name: Optional[str] = None
     kind: Optional[str] = None  # 'order' | 'comp'
     ticket_type_name: Optional[str] = None
@@ -54,7 +55,7 @@ class CheckInStats(BaseModel):
 
 def _describe(db: Session, ticket: Ticket) -> dict:
     """Everything the door needs to greet the person behind a code."""
-    out: dict = {"code": ticket.code}
+    out: dict = {"code": ticket.code, "valid_date": ticket.valid_date}
     if ticket.guest_id:
         guest = db.query(Guest).filter(Guest.id == ticket.guest_id).first()
         gt = db.query(GuestType).filter(GuestType.id == guest.guest_type_id).first() if guest else None
@@ -100,9 +101,15 @@ def _describe(db: Session, ticket: Ticket) -> dict:
 def check_in(
     event_id: str,
     code: str,
+    day: Optional[str] = None,
     db: Session = Depends(get_db),
     user: CurrentUser = Depends(require_event_access),
 ):
+    """`day` is the door's local date (the scanner sends it); when
+    absent we fall back to the server's UTC date. Undated tickets —
+    everything pre-multi-day, and comps without a visit date — admit on
+    any day, so single-day events behave exactly as before."""
+    scan_day = (day or "").strip() or datetime.now(timezone.utc).date().isoformat()
     ticket = (
         db.query(Ticket)
         .filter(Ticket.event_id == event_id, Ticket.code == code.strip().upper())
@@ -114,6 +121,10 @@ def check_in(
     info = _describe(db, ticket)
     if ticket.status == TicketStatus.REFUNDED:
         return CheckInResult(result="refunded", **info)
+    if ticket.valid_date and ticket.valid_date != scan_day:
+        # Dated code on the wrong day: NOT consumed — it still admits on
+        # its own day.
+        return CheckInResult(result="wrong_day", **info)
     if ticket.checked_in_at is not None:
         return CheckInResult(result="already_checked_in", checked_in_at=ticket.checked_in_at, **info)
     ticket.checked_in_at = datetime.now(timezone.utc)

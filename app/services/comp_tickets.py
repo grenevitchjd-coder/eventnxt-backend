@@ -57,6 +57,28 @@ def comp_delivery_for(db: Session, event_id) -> str:
     return row.comp_delivery if row else "rsvp_required"
 
 
+def event_days_for(db: Session, event_id) -> list[str]:
+    """
+    The event's day list as ISO strings, inclusive — [] for single-day
+    span or unconfigured days. Read from the settings row (no auth
+    needed), so the public checkout path can mint dated codes.
+    """
+    from datetime import date, timedelta
+
+    row = get_event_settings_row(db, event_id)
+    if not row or row.ticket_span == "single_day" or not (row.first_day and row.last_day):
+        return []
+    try:
+        first, last = date.fromisoformat(row.first_day), date.fromisoformat(row.last_day)
+    except ValueError:
+        return []
+    days, d = [], first
+    while d <= last and len(days) < 60:  # sanity cap
+        days.append(d.isoformat())
+        d += timedelta(days=1)
+    return days
+
+
 def is_native_ticketing(db: Session, event_id) -> bool:
     """Comp ticket codes only mint for events selling through EventNXT —
     the rule as stated: 'if selling thru eventnxt then when RSVP is yes,
@@ -95,6 +117,10 @@ def issue_comp_tickets(db: Session, guest: Guest) -> list[Ticket]:
             event_id=guest.event_id,
             code=generate_ticket_code(),
             status=TicketStatus.VALID,
+            # A day-specific guest's codes admit that day only; guests
+            # with no visit date stay undated (undated = any day at the
+            # door). Whole-event per-day comp fan-out is slice 4.
+            valid_date=guest.visit_date or None,
         )
         db.add(t)
         minted.append(t)
@@ -131,8 +157,21 @@ def send_comp_ticket_email(db: Session, guest: Guest, tickets: list[Ticket]) -> 
     )
     seat_for = lambda t: seat_by_id.get(t.seat_id)  # noqa: E731
 
+    def day_for(t):
+        if not t.valid_date:
+            return None
+        from datetime import date as _date
+
+        try:
+            return _date.fromisoformat(t.valid_date).strftime("%a %b %-d")
+        except ValueError:
+            return t.valid_date
+
     codes = "\n".join(
-        f"  {t.code}" + (f"  ({seat_for(t)})" if seat_for(t) else "") for t in tickets
+        f"  {t.code}"
+        + (f"  [{day_for(t)}]" if day_for(t) else "")
+        + (f"  ({seat_for(t)})" if seat_for(t) else "")
+        for t in tickets
     )
     plural = "s" if len(tickets) > 1 else ""
     when = f"\nDate: {guest.visit_date}" if guest.visit_date else ""
@@ -155,6 +194,7 @@ def send_comp_ticket_email(db: Session, guest: Guest, tickets: list[Ticket]) -> 
         f"<img src='{qr_base}/{t.code}/qr.png' width='150' height='150' "
         f"style='display:block;margin:0 auto 6px;border-radius:8px' alt='QR for {t.code}'/>"
         f"<span style='font-family:monospace;font-size:15px'>{t.code}</span>"
+        + (f"<br/><span style='font-size:13px;font-weight:600'>{day_for(t)}</span>" if day_for(t) else "")
         + (f"<br/><span style='font-size:13px'>{seat_for(t)}</span>" if seat_for(t) else "")
         + f"</td></tr>"
         for t in tickets

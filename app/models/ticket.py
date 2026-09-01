@@ -47,6 +47,9 @@ class Ticket(Base):
 
     seat_id = Column(UUID(as_uuid=True), ForeignKey("seats.id", ondelete="SET NULL"), nullable=True, index=True)  # the assigned seat this code admits to (comps and GA leave it null)
     # Set once at the door — the moment this code admitted its person.
+    # The day this code admits on (ISO string). NULL = any day — every
+    # pre-0032 ticket, and comps without a visit date.
+    valid_date = Column(String, nullable=True)
     checked_in_at = Column(DateTime(timezone=True), nullable=True)
 
     created_at = Column(DateTime(timezone=True), server_default=func.now())

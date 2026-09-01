@@ -11,6 +11,11 @@ class EventSettingsResponse(BaseModel):
     ticketing_mode: str
     sales_source: str
     comp_delivery: str
+    ticket_span: str = "single_day"
+    pricing_mode: str = "uniform"
+    seating_mode: str = "uniform"
+    first_day: Optional[str] = None
+    last_day: Optional[str] = None
     updated_at: Optional[datetime] = None
 
     class Config:
@@ -25,3 +30,8 @@ class EventSettingsUpdateRequest(BaseModel):
     ticketing_mode: Optional[str] = None
     sales_source: Optional[str] = None
     comp_delivery: Optional[str] = None
+    ticket_span: Optional[str] = None
+    pricing_mode: Optional[str] = None
+    seating_mode: Optional[str] = None
+    first_day: Optional[str] = None
+    last_day: Optional[str] = None

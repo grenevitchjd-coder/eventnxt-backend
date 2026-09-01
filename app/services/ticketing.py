@@ -272,29 +272,46 @@ def fulfill_paid_order(db: Session, order: Order) -> list[Ticket]:
 
     items = db.query(OrderItem).filter(OrderItem.order_id == order.id).all()
     # One purchased unit mints `admits` codes (whole tables, group packs).
-    admits_by_tt = {
-        tt.id: (tt.admits or 1)
+    tts_by_id = {
+        tt.id: tt
         for tt in db.query(TicketType).filter(TicketType.id.in_([i.ticket_type_id for i in items])).all()
     } if items else {}
+    # Multi-day: a whole-event admission fans out to one dated code per
+    # event day; a dated type mints for its day only; a single-day event
+    # (no day list) mints undated codes exactly as before 0032.
+    from app.services.comp_tickets import event_days_for
+
+    event_days = event_days_for(db, order.event_id)
     tickets: list[Ticket] = []
     for item in items:
+        tt = tts_by_id.get(item.ticket_type_id)
+        if tt is not None and tt.valid_date:
+            dates = [tt.valid_date]
+        elif event_days:
+            dates = event_days
+        else:
+            dates = [None]
         # Assigned seats: stamp each minted code with its chosen seat.
         # Seat-picked items are admits-1 (enforced at hold time), so the
-        # code count equals the seat count; unpicked items get no stamp.
+        # ADMISSION count equals the seat count; each admission then
+        # mints one code per date — a whole-event seat purchase keeps
+        # the same seat on every day's code.
         seat_iter = iter(seats_service.seats_for_order_item(db, item.id))
-        for _ in range(item.quantity * admits_by_tt.get(item.ticket_type_id, 1)):
+        for _ in range(item.quantity * ((tt.admits if tt else 1) or 1)):
             seat = next(seat_iter, None)
-            ticket = Ticket(
-                order_id=order.id,
-                order_item_id=item.id,
-                ticket_type_id=item.ticket_type_id,
-                event_id=order.event_id,
-                code=generate_ticket_code(),
-                status=TicketStatus.VALID,
-                seat_id=seat.id if seat else None,
-            )
-            db.add(ticket)
-            tickets.append(ticket)
+            for valid_date in dates:
+                ticket = Ticket(
+                    order_id=order.id,
+                    order_item_id=item.id,
+                    ticket_type_id=item.ticket_type_id,
+                    event_id=order.event_id,
+                    code=generate_ticket_code(),
+                    status=TicketStatus.VALID,
+                    seat_id=seat.id if seat else None,
+                    valid_date=valid_date,
+                )
+                db.add(ticket)
+                tickets.append(ticket)
     db.flush()
     return tickets
 
@@ -311,14 +328,25 @@ def send_order_confirmation_email(order: Order, tickets: list[Ticket], event_tit
     Returns True if sent; never raises.
     """
     try:
-        ticket_lines = "\n".join(f"  - {t.code}" for t in tickets)
+        def _day(t):
+            if not t.valid_date:
+                return ""
+            from datetime import date as _date
+
+            try:
+                return f" [{_date.fromisoformat(t.valid_date).strftime('%a %b %-d')}]"
+            except ValueError:
+                return f" [{t.valid_date}]"
+
+        ticket_lines = "\n".join(f"  - {t.code}{_day(t)}" for t in tickets)
         qr_base = f"{settings.eventnxt_backend_url}/public/tickets"
         ticket_rows = "".join(
             f"<tr><td style='padding:10px 12px;text-align:center'>"
             f"<img src='{qr_base}/{t.code}/qr.png' width='150' height='150' "
             f"style='display:block;margin:0 auto 6px;border-radius:8px' alt='QR for {t.code}'/>"
             f"<span style='font-family:monospace;font-size:15px'>{t.code}</span>"
-            f"</td></tr>"
+            + (f"<br/><span style='font-size:13px;font-weight:600'>{_day(t).strip()}</span>" if t.valid_date else "")
+            + f"</td></tr>"
             for t in tickets
         )
         total = _format_money(order.subtotal_cents, order.currency)

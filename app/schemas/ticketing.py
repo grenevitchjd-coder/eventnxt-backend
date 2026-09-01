@@ -145,6 +145,7 @@ class PublicTicketResponse(BaseModel):
     ticket_type_name: str
     status: str
     seat_label: Optional[str] = None  # "Section A · Row 1 · Seat 14"
+    valid_date: Optional[str] = None  # multi-day: the day this code admits on
 
 
 class PublicOrderResponse(BaseModel):

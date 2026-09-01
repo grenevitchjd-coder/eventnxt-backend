@@ -414,6 +414,7 @@ def get_public_order(order_token: str, db: Session = Depends(get_db)):
                 ticket_type_name=_ticket_type_name(items, t),
                 status=t.status.value,
                 seat_label=seat_labels.get(t.seat_id) or _section_label_for(items, t),
+                valid_date=t.valid_date,
             )
             for t in tickets
         ],
