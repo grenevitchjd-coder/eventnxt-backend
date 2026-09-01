@@ -65,10 +65,15 @@ def _describe(db: Session, ticket: Ticket) -> dict:
             .all()
         )
         idx = next((i + 1 for i, t in enumerate(siblings) if t.id == ticket.id), None)
+        comp_seat_label = None
+        if ticket.seat_id:
+            seat = db.query(Seat).filter(Seat.id == ticket.seat_id).first()
+            comp_seat_label = seat.label if seat else None
         out.update(
             kind="comp",
             name=guest.name if guest else None,
             ticket_type_name=(gt.name if gt else None),
+            seat_label=comp_seat_label,
             party_note=(f"code {idx} of {len(siblings)} for this guest" if idx and len(siblings) > 1 else None),
         )
     else:

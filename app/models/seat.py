@@ -37,6 +37,10 @@ class Seat(Base):
     seat_number = Column(Integer, nullable=False)
     is_blocked = Column(Boolean, nullable=False, default=False)
     block_label = Column(String, nullable=True)  # why it's held: "Press", "Sponsor hold"…
+    # The comp guest this seat is assigned to. Assignment implies
+    # reservation (assign sets is_blocked too) so sale predicates never
+    # change. SET NULL on guest delete — the seat stays reserved.
+    guest_id = Column(UUID(as_uuid=True), ForeignKey("guests.id", ondelete="SET NULL"), nullable=True, index=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
     @property

@@ -62,11 +62,19 @@ class GuestResponse(BaseModel):
     effective_mode: str = "invite"
     needs_seating: bool = False
     ticket_count: int = 0
+    seat_labels: List[str] = []  # assigned seats, display order
     link_sent_at: Optional[datetime] = None
     created_at: datetime
 
     class Config:
         from_attributes = True
+
+
+class GuestSeatsAssignRequest(BaseModel):
+    """Wholesale replace of the guest's assigned seats (empty = unassign
+    all; released seats stay reserved)."""
+
+    seat_ids: List[uuid.UUID] = []
 
 
 class GuestSentStatusRequest(BaseModel):

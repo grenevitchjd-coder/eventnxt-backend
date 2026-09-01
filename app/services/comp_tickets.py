@@ -98,6 +98,14 @@ def issue_comp_tickets(db: Session, guest: Guest) -> list[Ticket]:
         )
         db.add(t)
         minted.append(t)
+    # Hand-placed guests (reserved seats assigned before the RSVP came
+    # back): stamp their seats onto the new codes so the confirmation
+    # email, order page, and door scan all show "Section A · Seat 3".
+    from app.services import seats as seats_service
+
+    if minted:
+        db.flush()  # tickets need identities before stamping
+    seats_service.restamp_guest_tickets(db, guest)
     return existing + minted
 
 
@@ -114,7 +122,18 @@ def send_comp_ticket_email(db: Session, guest: Guest, tickets: list[Ticket]) -> 
     profile = db.query(EventProfile).filter(EventProfile.event_id == guest.event_id).first()
     event_name = profile.title if profile else "your event"
 
-    codes = "\n".join(f"  {t.code}" for t in tickets)
+    # Assigned seats (hand-placed guests): show the seat next to its code.
+    from app.models.seat import Seat
+
+    seat_ids = [t.seat_id for t in tickets if t.seat_id]
+    seat_by_id = (
+        {s.id: s.label for s in db.query(Seat).filter(Seat.id.in_(seat_ids)).all()} if seat_ids else {}
+    )
+    seat_for = lambda t: seat_by_id.get(t.seat_id)  # noqa: E731
+
+    codes = "\n".join(
+        f"  {t.code}" + (f"  ({seat_for(t)})" if seat_for(t) else "") for t in tickets
+    )
     plural = "s" if len(tickets) > 1 else ""
     when = f"\nDate: {guest.visit_date}" if guest.visit_date else ""
     page = f"\nEvent page: {app_settings.eventnxt_frontend_url}/e/{profile.slug}" if profile and profile.is_published else ""
@@ -133,7 +152,8 @@ def send_comp_ticket_email(db: Session, guest: Guest, tickets: list[Ticket]) -> 
         f"<img src='{qr_base}/{t.code}/qr.png' width='150' height='150' "
         f"style='display:block;margin:0 auto 6px;border-radius:8px' alt='QR for {t.code}'/>"
         f"<span style='font-family:monospace;font-size:15px'>{t.code}</span>"
-        f"</td></tr>"
+        + (f"<br/><span style='font-size:13px'>{seat_for(t)}</span>" if seat_for(t) else "")
+        + f"</td></tr>"
         for t in tickets
     )
     html = (

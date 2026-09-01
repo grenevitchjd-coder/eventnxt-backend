@@ -15,12 +15,14 @@ from app.schemas.guest import (
     GuestCreateRequest,
     GuestUpdateRequest,
     GuestResponse,
+    GuestSeatsAssignRequest,
     GuestSentStatusRequest,
     TicketAllotmentDayItem,
 )
 from app.models.guest_ticket_request import GuestTicketRequest
 from app.schemas.guest_ticket_request import GuestTicketRequestResponse
 from app.services import comp_tickets, seating
+from app.services import seats as seats_service
 from app.services.deps import CurrentUser
 from app.services.event_access import require_event_access
 
@@ -60,6 +62,7 @@ def _serialize_guest(db: Session, guest: Guest) -> GuestResponse:
         effective_mode=comp_tickets.effective_guest_mode(db, guest),
         needs_seating=bool(guest.needs_seating),
         ticket_count=len(comp_tickets.valid_comp_tickets(db, guest)),
+        seat_labels=[s.label for s in seats_service.guest_seats(db, guest.id)],
         link_sent_at=guest.link_sent_at,
         created_at=guest.created_at,
     )
@@ -230,6 +233,37 @@ def update_guest(
     db.commit()
     db.refresh(guest)
     return _serialize_guest(db, guest)
+
+
+@router.put("/{guest_id}/seats")
+def set_guest_seats(
+    event_id: str,
+    guest_id: str,
+    payload: GuestSeatsAssignRequest,
+    db: Session = Depends(get_db),
+    user: CurrentUser = Depends(require_event_access),
+):
+    """
+    Wholesale-replace this guest's assigned seats (Slice B of reserved
+    seats). Assigning implies reserving — the seats go off sale if they
+    weren't already; releasing a seat from the guest KEEPS it reserved.
+    The guest's existing comp ticket codes are re-stamped so the door
+    scan and any re-sent email show the seat. Returns the updated guest
+    plus the pool's full seat view so the UI repaints from one response.
+    """
+    guest = db.query(Guest).filter(Guest.id == guest_id, Guest.event_id == event_id).first()
+    if not guest:
+        raise HTTPException(status_code=404, detail="Guest not found.")
+    seats_service.assign_guest_seats(db, guest=guest, seat_ids=payload.seat_ids)
+    db.commit()
+    db.refresh(guest)
+    category = (
+        db.query(SeatingCategory).filter(SeatingCategory.id == guest.seating_category_id).first()
+    )
+    return {
+        "guest": _serialize_guest(db, guest),
+        "seats": seats_service.admin_seat_statuses(db, category) if category else [],
+    }
 
 
 @router.patch("/{guest_id}/sent-status", response_model=GuestResponse)

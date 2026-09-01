@@ -149,6 +149,8 @@ class AdminSeatResponse(BaseModel):
     label: str
     status: str  # 'available' | 'sold' | 'held' | 'reserved'
     block_label: Optional[str] = None
+    guest_id: Optional[uuid.UUID] = None  # comp guest this seat is assigned to
+    guest_name: Optional[str] = None
 
 
 class SeatBlockRequest(BaseModel):

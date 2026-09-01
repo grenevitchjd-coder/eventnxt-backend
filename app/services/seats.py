@@ -133,20 +133,40 @@ def admin_seat_statuses(db: Session, category: SeatingCategory) -> list[dict]:
     if not seats:
         return []
     ids = [s.id for s in seats]
-    sold = {
+    # "sold" in the organizer's view means BOX OFFICE — a buyer's ticket.
+    # A comp code stamped onto a seat keeps the seat "reserved" (with the
+    # guest's name), even though both are VALID tickets to the sale
+    # predicates. taken_seat_ids still counts both, so a comp-stamped
+    # seat can never sell regardless of its blocked flag.
+    box_sold = {
         sid
         for (sid,) in db.query(Ticket.seat_id)
-        .filter(Ticket.seat_id.in_(ids), Ticket.status == TicketStatus.VALID)
+        .filter(Ticket.seat_id.in_(ids), Ticket.status == TicketStatus.VALID, Ticket.guest_id.is_(None))
         .all()
     }
-    taken = taken_seat_ids(db, ids)  # sold ∪ held
+    comp_stamped = {
+        sid
+        for (sid,) in db.query(Ticket.seat_id)
+        .filter(Ticket.seat_id.in_(ids), Ticket.status == TicketStatus.VALID, Ticket.guest_id.isnot(None))
+        .all()
+    }
+    taken = taken_seat_ids(db, ids)
+    held = taken - box_sold - comp_stamped
+    from app.models.guest import Guest
+
+    guest_ids = {s.guest_id for s in seats if s.guest_id}
+    guest_names = (
+        {gid: name for (gid, name) in db.query(Guest.id, Guest.name).filter(Guest.id.in_(guest_ids)).all()}
+        if guest_ids
+        else {}
+    )
     out = []
     for s in seats:
-        if s.id in sold:
+        if s.id in box_sold:
             status = "sold"
-        elif s.id in taken:
+        elif s.id in held:
             status = "held"
-        elif s.is_blocked:
+        elif s.is_blocked or s.id in comp_stamped:
             status = "reserved"
         else:
             status = "available"
@@ -160,9 +180,122 @@ def admin_seat_statuses(db: Session, category: SeatingCategory) -> list[dict]:
                 "label": s.label,
                 "status": status,
                 "block_label": s.block_label,
+                "guest_id": s.guest_id,
+                "guest_name": guest_names.get(s.guest_id),
             }
         )
     return out
+
+
+def guest_seats(db: Session, guest_id: uuid.UUID) -> list[Seat]:
+    return (
+        db.query(Seat)
+        .filter(Seat.guest_id == guest_id)
+        .order_by(Seat.section_label, Seat.row_label, Seat.seat_number)
+        .all()
+    )
+
+
+def restamp_guest_tickets(db: Session, guest) -> None:
+    """
+    Make the guest's VALID comp tickets mirror their assigned seats:
+    tickets pointing at a seat no longer theirs are cleared; unstamped
+    tickets take assigned seats that no VALID ticket carries yet, in
+    seat order. Called after assignment changes AND after minting, so
+    assign-then-RSVP and RSVP-then-assign both end in the same place.
+    """
+    db.flush()  # SessionLocal is autoflush=False — pending guest_id changes must land before we query
+    assigned = guest_seats(db, guest.id)
+    assigned_ids = {s.id for s in assigned}
+    tickets = (
+        db.query(Ticket)
+        .filter(Ticket.guest_id == guest.id, Ticket.status == TicketStatus.VALID)
+        .order_by(Ticket.created_at)
+        .all()
+    )
+    for t in tickets:
+        if t.seat_id is not None and t.seat_id not in assigned_ids:
+            t.seat_id = None
+    carried = {t.seat_id for t in tickets if t.seat_id}
+    free_seats = [s for s in assigned if s.id not in carried]
+    for t in tickets:
+        if t.seat_id is None and free_seats:
+            t.seat_id = free_seats.pop(0).id
+
+
+def assign_guest_seats(db: Session, *, guest, seat_ids: list[uuid.UUID]) -> list[Seat]:
+    """
+    Wholesale-replace a guest's seat assignment (same full-replace
+    contract as sections). Locks every affected seat FOR UPDATE in id
+    order — current seats being released plus requested ones — then
+    validates UNDER the lock: requested seats must be in the guest's
+    pool and neither taken (sold/held) nor another guest's. Assignment
+    implies reservation: newly assigned seats become blocked (labeled
+    with the guest's name unless already labeled). Released seats KEEP
+    their reservation — freeing a press hold is a deliberate act in the
+    seat view, never a side effect of reshuffling one guest.
+    Finally re-stamps the guest's comp tickets. Caller commits.
+    """
+    if guest.seating_category_id is None:
+        raise HTTPException(
+            status_code=400,
+            detail=f"{guest.name} isn't assigned to a seating area yet — set their area first, then pick seats.",
+        )
+    if len(set(seat_ids)) != len(seat_ids):
+        raise HTTPException(status_code=400, detail="The same seat was picked twice.")
+
+    current_ids = [s.id for s in guest_seats(db, guest.id)]
+    affected = sorted(set(seat_ids) | set(current_ids))
+    seats = (
+        db.query(Seat).filter(Seat.id.in_(affected)).order_by(Seat.id).with_for_update().all()
+        if affected
+        else []
+    )
+    by_id = {s.id: s for s in seats}
+    missing = [sid for sid in seat_ids if sid not in by_id]
+    if missing:
+        raise HTTPException(status_code=404, detail="One of those seats no longer exists — refresh and try again.")
+
+    wanted = [by_id[sid] for sid in seat_ids]
+    for seat in wanted:
+        if seat.seating_category_id != guest.seating_category_id:
+            raise HTTPException(
+                status_code=400,
+                detail=f"{seat.label} isn't in {guest.name}'s seating area — move the guest to that area first.",
+            )
+        if seat.guest_id is not None and seat.guest_id != guest.id:
+            raise HTTPException(status_code=400, detail=f"{seat.label} is already assigned to another guest.")
+    conflicts = taken_seat_ids(db, [s.id for s in wanted])
+    # A guest's OWN comp tickets make their current seats "taken" — that's
+    # not a conflict when re-affirming those seats in a wholesale update.
+    own = {
+        sid
+        for (sid,) in db.query(Ticket.seat_id)
+        .filter(
+            Ticket.guest_id == guest.id,
+            Ticket.status == TicketStatus.VALID,
+            Ticket.seat_id.in_([s.id for s in wanted]),
+        )
+        .all()
+    }
+    conflicts -= own
+    if conflicts:
+        victim = next(s for s in wanted if s.id in conflicts)
+        raise HTTPException(status_code=400, detail=f"{victim.label} is sold or in a buyer's cart.")
+
+    wanted_ids = set(seat_ids)
+    for seat in seats:
+        if seat.guest_id == guest.id and seat.id not in wanted_ids:
+            seat.guest_id = None  # released from the guest, stays reserved
+    for seat in wanted:
+        seat.guest_id = guest.id
+        if not seat.is_blocked:
+            seat.is_blocked = True
+        if not seat.block_label:
+            seat.block_label = guest.name
+
+    restamp_guest_tickets(db, guest)
+    return wanted
 
 
 def sync_seats_for_pool(db: Session, category: SeatingCategory) -> None:

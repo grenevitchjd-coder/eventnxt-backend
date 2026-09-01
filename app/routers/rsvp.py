@@ -201,7 +201,20 @@ def respond_to_rsvp(token: str, payload: RSVPRespondRequest, db: Session = Depen
         new_category_id = seating.resolve_seating_from_priorities(
             db, str(guest.event_id), str(guest.guest_type_id), party_size=guest.party_size
         )
-        if new_category_id is None and seating.has_seating_priorities(db, str(guest.guest_type_id)):
+        # Hand-placed guests (organizer assigned them specific reserved
+        # seats) are NEVER moved by the priority resolver — their yes
+        # confirms them exactly where they were placed.
+        from app.services import seats as seats_service
+
+        if seats_service.guest_seats(db, guest.id):
+            guest.allocation_status = GuestAllocationStatus.CONFIRMED
+            guest.rsvp_confirmed = "yes"
+            guest.needs_seating = False
+            if comp_tickets.is_native_ticketing(db, guest.event_id):
+                tickets = comp_tickets.issue_comp_tickets(db, guest)
+                db.flush()
+                comp_tickets.send_comp_ticket_email(db, guest, tickets)
+        elif new_category_id is None and seating.has_seating_priorities(db, str(guest.guest_type_id)):
             # SOFT landing, not a hard error: the yes is recorded, no seat
             # is claimed (allocation stays PENDING so capacity math never
             # counts a phantom), and the guest lands in the organizer's
@@ -228,6 +241,13 @@ def respond_to_rsvp(token: str, payload: RSVPRespondRequest, db: Session = Depen
         guest.needs_seating = False
         # A declined guest releases their seat back to the pool.
         guest.seating_category_id = None
+        # ...and any hand-assigned seats release from the guest but STAY
+        # reserved, ready to hand to someone else.
+        from app.services import seats as seats_service
+
+        for seat in seats_service.guest_seats(db, guest.id):
+            seat.guest_id = None
+        seats_service.restamp_guest_tickets(db, guest)
 
     db.commit()
     db.refresh(guest)
