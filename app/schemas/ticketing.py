@@ -18,6 +18,9 @@ class TicketTypeCreateOrUpdateRequest(BaseModel):
     max_per_order: int = Field(default=10, ge=1)
     admits: int = Field(default=1, ge=1)
     seating_category_id: Optional[uuid.UUID] = None
+    # Multi-day (per_day / mixed spans): the day this type sells for.
+    # None = whole event (only legal outside per_day span).
+    valid_date: Optional[str] = None
     sales_start: Optional[datetime] = None
     sales_end: Optional[datetime] = None
     is_active: bool = True
@@ -35,6 +38,7 @@ class TicketTypeAdminResponse(BaseModel):
     quantity: int
     max_per_order: int
     admits: int = 1
+    valid_date: Optional[str] = None  # multi-day: the day this type sells for (None = whole event)
     sales_start: Optional[datetime] = None
     sales_end: Optional[datetime] = None
     is_active: bool
@@ -59,6 +63,7 @@ class PublicTicketTypeResponse(BaseModel):
     currency: str
     max_per_order: int
     admits: int = 1
+    valid_date: Optional[str] = None  # multi-day: which day this type sells for (None = whole event)
     available: int
     on_sale: bool
     # True when this type sells specific seats — the picker swaps the

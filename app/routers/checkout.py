@@ -106,6 +106,7 @@ def list_public_ticket_types(slug: str, db: Session = Depends(get_db)):
             currency=t.currency,
             max_per_order=t.max_per_order,
             admits=t.admits or 1,
+            valid_date=t.valid_date,
             assigned_seating=t.seating_category_id in assigned_pool_ids,
             section_required=t.seating_category_id in section_pool_ids,
             sections=sections_by_pool.get(t.seating_category_id, []),
