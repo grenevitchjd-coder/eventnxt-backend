@@ -29,4 +29,11 @@ class GuestTypeSeatingPriority(Base):
     # philosophy as seats). Labels that stop existing are skipped by the
     # resolver.
     section_label = Column(String, nullable=True)
+    # Comma-separated section labels this priority may place into ("C,D,E").
+    # NULL = section_label alone (or the whole pool). Supersedes
+    # section_label when set.
+    allowed_sections = Column(String, nullable=True)
+    # 'together' fills allowed sections in declared order; 'spread'
+    # round-robins to the emptiest allowed section.
+    placement = Column(String, nullable=False, default="together")
     created_at = Column(DateTime(timezone=True), server_default=func.now())

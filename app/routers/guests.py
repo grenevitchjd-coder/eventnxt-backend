@@ -74,6 +74,7 @@ def _serialize_guest(db: Session, guest: Guest) -> GuestResponse:
         allotment_distributed=allotment_distributed,
         visit_date=guest.visit_date,
         hold_timing=guest.hold_timing or "now",
+        cohort_together=bool(guest.cohort_together) if guest.cohort_together is not None else True,
         allocated_by_guest_id=guest.allocated_by_guest_id,
         rsvp_token=guest.rsvp_token,
         rsvp_confirmed=guest.rsvp_confirmed,
@@ -163,6 +164,7 @@ def create_guest(
         party_size=payload.party_size,
         visit_date=payload.visit_date,
         hold_timing=payload.hold_timing,
+        cohort_together=payload.cohort_together,
         perks=payload.perks,
         comments=payload.comments,
         ticket_allotment_overridden=payload.ticket_allotment is not None,
@@ -268,6 +270,7 @@ def update_guest(
     guest.party_size = payload.party_size
     guest.visit_date = payload.visit_date
     guest.hold_timing = payload.hold_timing
+    guest.cohort_together = payload.cohort_together
     guest.perks = payload.perks
     guest.comments = payload.comments
     guest.guest_mode = payload.guest_mode

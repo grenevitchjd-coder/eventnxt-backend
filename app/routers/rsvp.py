@@ -248,8 +248,15 @@ def respond_to_rsvp(token: str, payload: RSVPRespondRequest, db: Session = Depen
                 )
             guest.visit_date = payload.visit_date
 
+        parent_cohort = True
+        if guest.allocated_by_guest_id:
+            parent_cohort = bool(
+                db.query(Guest.cohort_together).filter(Guest.id == guest.allocated_by_guest_id).scalar()
+            )
         new_category_id, new_section_label = seating.resolve_seating_placement(
-            db, str(guest.event_id), str(guest.guest_type_id), party_size=guest.party_size, visit_date=guest.visit_date
+            db, str(guest.event_id), str(guest.guest_type_id), party_size=guest.party_size,
+            visit_date=guest.visit_date,
+            allocated_by_guest_id=guest.allocated_by_guest_id, cohort_together=parent_cohort,
         )
         # Hand-placed guests (organizer assigned them specific reserved
         # seats) are NEVER moved by the priority resolver — their yes

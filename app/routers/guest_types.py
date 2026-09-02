@@ -145,6 +145,7 @@ def add_seating_priority(
         raise HTTPException(status_code=404, detail="That seating category doesn't belong to this event.")
 
     section_label = (payload.section_label or "").strip() or None
+    allowed = [s.strip() for s in (payload.allowed_sections or []) if s.strip()]
     if section_label:
         from app.models.zone_section import ZoneSection
 
@@ -167,10 +168,27 @@ def add_seating_priority(
         .filter(GuestTypeSeatingPriority.guest_type_id == guest_type_id)
         .count()
     )
+    if allowed:
+        from app.models.zone_section import ZoneSection
+
+        have = {
+            lbl
+            for (lbl,) in db.query(ZoneSection.section_label)
+            .filter(ZoneSection.seating_category_id == category.id)
+            .all()
+        }
+        bad = [s for s in allowed if s not in have]
+        if bad:
+            raise HTTPException(
+                status_code=400,
+                detail=f'"{category.name}" has no section "{bad[0]}" — allowed sections must exist in the pool.',
+            )
     priority = GuestTypeSeatingPriority(
         guest_type_id=guest_type_id,
         seating_category_id=payload.seating_category_id,
         section_label=section_label,
+        allowed_sections=(','.join(allowed) or None),
+        placement=payload.placement,
         priority_order=existing_count,
     )
     db.add(priority)

@@ -237,7 +237,10 @@ def section_room_for_comps(db: Session, category: SeatingCategory, section_label
     return max(capacity - box_office - comp_heads_here, 0)
 
 
-def resolve_seating_placement(db: Session, event_id: str, guest_type_id: str, party_size: int = 1, visit_date=None):
+def resolve_seating_placement(
+    db: Session, event_id: str, guest_type_id: str, party_size: int = 1, visit_date=None,
+    allocated_by_guest_id=None, cohort_together: bool = True,
+):
     """
     Walks the guest type's ORDERED priority list and returns
     (category_id, section_label) for the first entry with room for
@@ -291,9 +294,43 @@ def resolve_seating_placement(db: Session, event_id: str, guest_type_id: str, pa
         category = categories_by_id.get(effective[p.id])
         if not category:
             continue
-        if p.section_label:
-            if section_room_for_comps(db, category, p.section_label) >= party_size:
-                return category.id, p.section_label
+        allowed = [s.strip() for s in (p.allowed_sections or "").split(",") if s.strip()]
+        if not allowed and p.section_label:
+            allowed = [p.section_label]
+        if allowed:
+            # Cohort first: recipients of the same allocation on the same
+            # day sit together when the parent wants it — a sibling's
+            # section wins if it's allowed and still has the room.
+            if allocated_by_guest_id and cohort_together and visit_date:
+                sibling_label = (
+                    db.query(Guest.section_label)
+                    .filter(
+                        Guest.allocated_by_guest_id == allocated_by_guest_id,
+                        Guest.visit_date == visit_date,
+                        Guest.seating_category_id == category.id,
+                        Guest.section_label.isnot(None),
+                        or_(
+                            Guest.allocation_status == GuestAllocationStatus.CONFIRMED,
+                            (Guest.allocation_status == GuestAllocationStatus.PENDING)
+                            & (Guest.hold_timing == "now"),
+                        ),
+                    )
+                    .order_by(Guest.created_at)
+                    .limit(1)
+                    .scalar()
+                )
+                if sibling_label and sibling_label in allowed:
+                    if section_room_for_comps(db, category, sibling_label) >= party_size:
+                        return category.id, sibling_label
+            # 'spread' round-robins to the emptiest allowed section;
+            # 'together' fills them in declared order. A party never
+            # splits — the whole party lands in one section either way.
+            candidates = list(allowed)
+            if p.placement == "spread":
+                candidates.sort(key=lambda lbl: -section_room_for_comps(db, category, lbl))
+            for lbl in candidates:
+                if section_room_for_comps(db, category, lbl) >= party_size:
+                    return category.id, lbl
             continue
         confirmed_total = (
             db.query(func.coalesce(func.sum(Guest.party_size), 0))

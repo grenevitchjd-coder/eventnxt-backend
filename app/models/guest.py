@@ -88,6 +88,10 @@ class Guest(Base):
     # When this guest's heads block public sales: 'now' (pending +
     # confirmed count — the default), 'on_confirm', or 'later'.
     hold_timing = Column(String, nullable=False, default="now")
+
+    # Distributing parents: do same-day recipients from this allocation
+    # sit together (one section, side by side) or spread individually?
+    cohort_together = Column(Boolean, nullable=False, default=True)
     # Which specific day this guest's own ticket/attendance is for.
     visit_date = Column(String, nullable=True)
     # Set when this guest was created by someone else's distribution —

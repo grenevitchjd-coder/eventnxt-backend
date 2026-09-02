@@ -31,6 +31,13 @@ def effective_guest_mode(db: Session, guest: Guest, allotment: dict | None = Non
     Callers that already computed effective_allotment pass it in to
     avoid a second lookup.
     """
+    # A delegated recipient (allocated_by set) is NEVER a distributor —
+    # distribution is one level deep. Without this, a recipient sharing
+    # their distributor's guest TYPE (the normal case) inherits the
+    # type's 'distribute' mode and their own RSVP link stops working.
+    if guest.allocated_by_guest_id is not None:
+        own = guest.guest_mode if guest.guest_mode in ("invite", "select") else None
+        return own or "invite"
     if guest.guest_mode in GUEST_MODES:
         return guest.guest_mode
     if guest.guest_type_id:
