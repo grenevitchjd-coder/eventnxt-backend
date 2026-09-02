@@ -91,11 +91,14 @@ class RedemptionHistoryItem(BaseModel):
 
 
 class DistributedRecipient(BaseModel):
+    id: Optional[str] = None  # for the portal's remove action
     name: str
     email: str
     visit_date: Optional[str] = None
     party_size: int
     allocation_status: str
+    rsvp_confirmed: Optional[str] = None  # null=no answer, "yes", "no"
+    rsvp_link: Optional[str] = None  # for manual forwarding
 
 
 class RSVPRespondRequest(BaseModel):

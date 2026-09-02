@@ -222,6 +222,48 @@ def issue_comp_tickets(db: Session, guest: Guest) -> list[Ticket]:
     return existing + minted
 
 
+def send_recipient_invite_email(db: Session, child: Guest, parent: Guest) -> bool:
+    """
+    Tell a distribution recipient they've been given tickets, with their
+    own RSVP link to confirm. Best-effort like every send here — the
+    child row exists either way and the link also shows on the parent's
+    portal for manual forwarding.
+    """
+    if not child.email:
+        return False
+    profile = db.query(EventProfile).filter(EventProfile.event_id == child.event_id).first()
+    event_name = profile.title if profile else "an event"
+    link = f"{app_settings.eventnxt_frontend_url}/rsvp/{child.rsvp_token}"
+    day = ""
+    if child.visit_date:
+        from datetime import date as _date
+
+        try:
+            day = f" for {_date.fromisoformat(child.visit_date).strftime('%a %b %-d')}"
+        except ValueError:
+            day = f" for {child.visit_date}"
+    plural = "s" if (child.party_size or 1) > 1 else ""
+    subject = f"{parent.name} sent you ticket{plural} to {event_name}"
+    text = (
+        f"Hi {child.name},\n\n"
+        f"{parent.name} has given you {child.party_size or 1} ticket{plural}{day} to {event_name}.\n"
+        f"Confirm here to receive your admission code{plural}:\n\n  {link}\n"
+    )
+    html = (
+        f"<p>Hi {child.name},</p>"
+        f"<p><strong>{parent.name}</strong> has given you <strong>{child.party_size or 1} ticket{plural}</strong>{day} to <strong>{event_name}</strong>.</p>"
+        f"<p><a href='{link}' style='display:inline-block;padding:10px 18px;background:#0F6E56;color:#fff;border-radius:8px;text-decoration:none'>Confirm your ticket{plural}</a></p>"
+        f"<p style='font-size:12px;color:#666'>{link}</p>"
+    )
+    from app.services.email import send_email
+
+    try:
+        send_email(child.email, subject, text, html)
+        return True
+    except Exception:
+        return False
+
+
 def send_comp_ticket_email(db: Session, guest: Guest, tickets: list[Ticket]) -> bool:
     """
     Email the guest their admission code(s). Best-effort: a failed or

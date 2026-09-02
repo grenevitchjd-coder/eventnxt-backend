@@ -4,6 +4,7 @@ import secrets
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
+from app.config import settings as app_settings
 from app.database import get_db
 from app.models.guest import Guest, GuestAllocationStatus
 from app.models.guest_type import GuestType
@@ -166,11 +167,14 @@ def get_rsvp_info(token: str, db: Session = Depends(get_db)):
         day_allotments=day_allotments,
         distributed_recipients=[
             DistributedRecipient(
+                id=str(c.id),
                 name=c.name,
                 email=c.email,
                 visit_date=c.visit_date,
                 party_size=c.party_size,
                 allocation_status=c.allocation_status.value,
+                rsvp_confirmed=c.rsvp_confirmed,
+                rsvp_link=f"{app_settings.eventnxt_frontend_url}/rsvp/{c.rsvp_token}",
             )
             for c in children
         ],
@@ -375,8 +379,9 @@ def distribute_tickets(token: str, payload: RSVPDistributeRequest, db: Session =
         requested_by_day[r.visit_date] = requested_by_day.get(r.visit_date, 0) + r.party_size
     seating.check_allotment_capacity_per_day(db, str(guest.id), requested_by_day, allotment)
 
+    children = []
     for r in payload.recipients:
-        db.add(
+        children.append(
             Guest(
                 event_id=guest.event_id,
                 name=r.name,
@@ -395,7 +400,40 @@ def distribute_tickets(token: str, payload: RSVPDistributeRequest, db: Session =
                 rsvp_token=secrets.token_urlsafe(24),
             )
         )
+    for c in children:
+        db.add(c)
 
+    db.commit()
+    # Each recipient gets their own invite email with their RSVP link —
+    # best-effort; the parent's portal shows the same links for manual
+    # forwarding when mail isn't configured.
+    for c in children:
+        comp_tickets.send_recipient_invite_email(db, c, guest)
+    return get_rsvp_info(token, db)
+
+
+@router.delete("/public/rsvp/{token}/recipients/{child_id}", response_model=RSVPInfoResponse)
+def remove_distributed_recipient(token: str, child_id: str, db: Session = Depends(get_db)):
+    """
+    The distributor taking back a still-pending recipient — frees that
+    day's budget for someone else. Only THEIR OWN pending recipients:
+    once a recipient has confirmed (or holds valid codes), changes go
+    through the organizer instead.
+    """
+    guest = _get_guest_by_token_or_404(db, token)
+    child = (
+        db.query(Guest)
+        .filter(Guest.id == child_id, Guest.allocated_by_guest_id == guest.id)
+        .first()
+    )
+    if not child:
+        raise HTTPException(status_code=404, detail="That recipient isn't on this allocation.")
+    if child.allocation_status == GuestAllocationStatus.CONFIRMED or comp_tickets.valid_comp_tickets(db, child):
+        raise HTTPException(
+            status_code=400,
+            detail=f"{child.name} has already confirmed — ask the event organizer to make changes.",
+        )
+    db.delete(child)
     db.commit()
     return get_rsvp_info(token, db)
 
