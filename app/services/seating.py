@@ -49,10 +49,48 @@ def check_capacity(db: Session, event_id: str, category_id: str, party_size: int
         )
 
 
-def resolve_seating_from_priorities(db: Session, event_id: str, guest_type_id: str, party_size: int = 1):
+def pool_for_day(db: Session, base_pool_id, visit_date):
+    """
+    Multi-day events clone a pool per day ("Row 2", "Row 2 (10/10)", …)
+    with each day's ticket type pointing at its own clone. Priorities are
+    configured ONCE against any night's pool; this maps that pool to the
+    sibling serving the guest's day: base pool -> its dated ticket type
+    -> the same-named family member for visit_date -> that member's
+    pool. Falls back to the base pool when there's nothing to map (no
+    visit date, undated types, or no sibling for that day).
+    """
+    if not visit_date:
+        return base_pool_id
+    from app.models.ticket_type import TicketType
+
+    base_type = (
+        db.query(TicketType)
+        .filter(TicketType.seating_category_id == base_pool_id, TicketType.valid_date.isnot(None))
+        .first()
+    )
+    if not base_type:
+        return base_pool_id
+    if base_type.valid_date == visit_date:
+        return base_pool_id
+    sibling = (
+        db.query(TicketType)
+        .filter(
+            TicketType.event_id == base_type.event_id,
+            TicketType.name == base_type.name,
+            TicketType.valid_date == visit_date,
+            TicketType.seating_category_id.isnot(None),
+        )
+        .first()
+    )
+    return sibling.seating_category_id if sibling else base_pool_id
+
+
+def resolve_seating_from_priorities(db: Session, event_id: str, guest_type_id: str, party_size: int = 1, visit_date=None):
     """Pool-only view of resolve_seating_placement, kept for call sites
     that only store a category (redemptions, request approval)."""
-    category_id, _section = resolve_seating_placement(db, event_id, guest_type_id, party_size=party_size)
+    category_id, _section = resolve_seating_placement(
+        db, event_id, guest_type_id, party_size=party_size, visit_date=visit_date
+    )
     return category_id
 
 
@@ -122,7 +160,7 @@ def section_room_for_comps(db: Session, category: SeatingCategory, section_label
     return max(capacity - box_office - comp_heads_here, 0)
 
 
-def resolve_seating_placement(db: Session, event_id: str, guest_type_id: str, party_size: int = 1):
+def resolve_seating_placement(db: Session, event_id: str, guest_type_id: str, party_size: int = 1, visit_date=None):
     """
     Walks the guest type's ORDERED priority list and returns
     (category_id, section_label) for the first entry with room for
@@ -156,7 +194,12 @@ def resolve_seating_placement(db: Session, event_id: str, guest_type_id: str, pa
     if not priorities:
         return None, None
 
-    category_ids = list({p.seating_category_id for p in priorities})
+    # Day-aware substitution: a visit-dated guest resolves against the
+    # pools serving THEIR day (per-day clones), configured once against
+    # any night. Substitution happens before locking so the lock set is
+    # the set actually judged.
+    effective = {p.id: pool_for_day(db, p.seating_category_id, visit_date) for p in priorities}
+    category_ids = list(set(effective.values()))
 
     locked_categories = (
         db.query(SeatingCategory)
@@ -168,7 +211,7 @@ def resolve_seating_placement(db: Session, event_id: str, guest_type_id: str, pa
     categories_by_id = {c.id: c for c in locked_categories}
 
     for p in priorities:  # now walk the REAL priority order to decide
-        category = categories_by_id.get(p.seating_category_id)
+        category = categories_by_id.get(effective[p.id])
         if not category:
             continue
         if p.section_label:

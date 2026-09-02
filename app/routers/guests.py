@@ -110,7 +110,7 @@ def create_guest(
         # Nothing explicit — walk the guest type's priority list for the
         # first category with enough room.
         effective_seating_category_id, effective_section_label = seating.resolve_seating_placement(
-            db, event_id, payload.guest_type_id, party_size=payload.party_size
+            db, event_id, payload.guest_type_id, party_size=payload.party_size, visit_date=payload.visit_date
         )
         if effective_seating_category_id is None:
             if seating.has_seating_priorities(db, payload.guest_type_id):
@@ -339,7 +339,7 @@ def send_ticket(
 
     if guest.seating_category_id is None:
         resolved = seating.resolve_seating_from_priorities(
-            db, event_id, str(guest.guest_type_id), party_size=guest.party_size
+            db, event_id, str(guest.guest_type_id), party_size=guest.party_size, visit_date=guest.visit_date
         )
         if resolved is None and seating.has_seating_priorities(db, str(guest.guest_type_id)):
             raise HTTPException(

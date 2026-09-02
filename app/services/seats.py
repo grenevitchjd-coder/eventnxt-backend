@@ -218,8 +218,13 @@ def restamp_guest_tickets(db: Session, guest) -> None:
             t.seat_id = None
     carried = {t.seat_id for t in tickets if t.seat_id}
     free_seats = [s for s in assigned if s.id not in carried]
+    # Multi-day guard: a seat lives in ONE night's pool, so it only
+    # stamps onto codes for the guest's own day (or undated codes).
+    # Whole-event comps with per-day codes keep other days unstamped
+    # rather than wrongly stamped.
+    stampable = lambda t: t.valid_date is None or t.valid_date == guest.visit_date  # noqa: E731
     for t in tickets:
-        if t.seat_id is None and free_seats:
+        if t.seat_id is None and stampable(t) and free_seats:
             t.seat_id = free_seats.pop(0).id
 
 

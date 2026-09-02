@@ -109,21 +109,45 @@ def issue_comp_tickets(db: Session, guest: Guest) -> list[Ticket]:
     never double-mint (it only tops up the shortfall). Caller commits.
     """
     existing = valid_comp_tickets(db, guest)
-    shortfall = max(0, (guest.party_size or 1) - len(existing))
+    party = guest.party_size or 1
     minted = []
-    for _ in range(shortfall):
-        t = Ticket(
-            guest_id=guest.id,
-            event_id=guest.event_id,
-            code=generate_ticket_code(),
-            status=TicketStatus.VALID,
-            # A day-specific guest's codes admit that day only; guests
-            # with no visit date stay undated (undated = any day at the
-            # door). Whole-event per-day comp fan-out is slice 4.
-            valid_date=guest.visit_date or None,
-        )
-        db.add(t)
-        minted.append(t)
+    days = event_days_for(db, guest.event_id)
+    has_undated = any(t.valid_date is None for t in existing)
+    if days and not guest.visit_date and not has_undated:
+        # Whole-event comp at a multi-day event: party_size dated codes
+        # PER DAY — the guest walks in every day on that day's code,
+        # same once-only door semantics as everything else. Idempotent
+        # per day (tops up each day's shortfall only). Guests who
+        # already hold undated codes are legacy — those admit any day,
+        # so they're topped up the old way rather than doubled.
+        by_day: dict = {}
+        for t in existing:
+            by_day[t.valid_date] = by_day.get(t.valid_date, 0) + 1
+        for day in days:
+            for _ in range(max(0, party - by_day.get(day, 0))):
+                t = Ticket(
+                    guest_id=guest.id,
+                    event_id=guest.event_id,
+                    code=generate_ticket_code(),
+                    status=TicketStatus.VALID,
+                    valid_date=day,
+                )
+                db.add(t)
+                minted.append(t)
+    else:
+        shortfall = max(0, party - len(existing))
+        for _ in range(shortfall):
+            t = Ticket(
+                guest_id=guest.id,
+                event_id=guest.event_id,
+                code=generate_ticket_code(),
+                status=TicketStatus.VALID,
+                # A day-specific guest's codes admit that day only;
+                # legacy/undated comps admit any day.
+                valid_date=guest.visit_date or None,
+            )
+            db.add(t)
+            minted.append(t)
     # Hand-placed guests (reserved seats assigned before the RSVP came
     # back): stamp their seats onto the new codes so the confirmation
     # email, order page, and door scan all show "Section A · Seat 3".

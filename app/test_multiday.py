@@ -132,8 +132,19 @@ def main():
                      headers=H).json()
     client.post(f"/public/rsvp/{g2['rsvp_token']}/respond", json={"attending": True})
     codes2 = client.get(f"/public/rsvp/{g2['rsvp_token']}").json().get("ticket_codes") or []
-    scan = client.post(f"/events/{EV}/check-in/{codes2[0]}?day={D3}", headers=H).json()
-    check("undated comp admits any day", scan["result"] == "admitted", scan)
+    # Slice 4: a whole-event comp at a multi-day event fans out to one
+    # dated code per day (legacy undated codes still admit any day —
+    # covered in test_compday.py).
+    check("whole-event comp mints one dated code per day", len(codes2) == 3, codes2)
+    scan = client.post(f"/events/{EV}/check-in/{codes2[-1]}?day={D3}", headers=H).json()
+    ok_d3 = scan["result"] == "admitted" or (scan["result"] == "wrong_day" and scan["valid_date"] in (D1, D2))
+    if scan["result"] != "admitted":
+        # order isn't guaranteed — find the D3 code and admit it
+        for c in codes2:
+            scan = client.post(f"/events/{EV}/check-in/{c}?day={D3}", headers=H).json()
+            if scan["result"] == "admitted":
+                break
+    check("the D3-dated comp code admits on D3", scan["result"] == "admitted", scan)
 
     # ---- 6. single-day regression ----
     tt3, slug2 = bootstrap(EV2, "GA", 20)

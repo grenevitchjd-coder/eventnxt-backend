@@ -145,7 +145,7 @@ def redeem(db: Session, event_id: str, promo_code_id: str, tier_id: str, choice:
     if choice == "ticket":
         referrer = db.query(Guest).filter(Guest.id == promo_code.guest_id).first()
         new_category_id = seating.resolve_seating_from_priorities(
-            db, event_id, str(referrer.guest_type_id), party_size=option.ticket_value
+            db, event_id, str(referrer.guest_type_id), party_size=option.ticket_value, visit_date=referrer.visit_date
         )
         if new_category_id is None and seating.has_seating_priorities(db, str(referrer.guest_type_id)):
             raise HTTPException(status_code=400, detail="Sorry — there's no room left to fulfill this reward.")
