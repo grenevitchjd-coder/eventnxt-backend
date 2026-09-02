@@ -308,6 +308,11 @@ def replace_guest_ticket_allotment(db: Session, guest_id: str, items) -> None:
     db.query(GuestTicketAllotment).filter(GuestTicketAllotment.guest_id == guest_id).delete()
     for item in items:
         db.add(GuestTicketAllotment(guest_id=guest_id, date=item.date, quantity=item.quantity))
+    # autoflush is OFF in this app and the bulk delete above hits the DB
+    # immediately — without this flush, a same-request read (e.g. the
+    # mint that follows an RSVP grid acceptance) would see NO rows and
+    # misclassify the guest. The delete-then-add pair must land together.
+    db.flush()
 
 
 def check_allotment_capacity_per_day(

@@ -11,6 +11,7 @@ from app.models.promo_code import PromoCode, RewardType
 from app.models.reward_redemption import RewardRedemption
 from app.models.guest_ticket_request import GuestTicketRequest
 from app.schemas.rsvp import (
+    DayGrantItem,
     DayAllotment,
     DistributedRecipient,
     EligibleTier,
@@ -104,7 +105,13 @@ def _guest_extras(db: Session, guest: Guest, allotment: dict) -> dict:
     )
     mode = comp_tickets.effective_guest_mode(db, guest, allotment)
     available_days = sorted(allotment.keys()) if mode == "select" else None
+    day_grants = (
+        [DayGrantItem(date=d, quantity=q) for d, q in sorted(allotment.items())]
+        if allotment and mode in ("invite", "select")
+        else None
+    )
     return {
+        "day_grants": day_grants,
         "effective_mode": mode,
         "needs_seating": bool(guest.needs_seating),
         "available_days": available_days,
@@ -186,6 +193,49 @@ def respond_to_rsvp(token: str, payload: RSVPRespondRequest, db: Session = Depen
         raise HTTPException(
             status_code=400, detail="This link is for distributing tickets, not a simple RSVP — use /distribute."
         )
+
+    if payload.attending and payload.day_quantities:
+        # Per-day acceptance grid. Invite: reduce-only against the grant
+        # ("need fewer" — more goes through /request-tickets). Select:
+        # spread up to party_size across the offered days, capped per
+        # day. Accepted shape replaces the guest's grant rows, voids any
+        # excess already-minted codes, and mints the rest below.
+        if not allotment:
+            raise HTTPException(status_code=400, detail="This invitation has no per-day tickets to adjust.")
+        cleaned: dict = {}
+        for d, q in payload.day_quantities.items():
+            if d not in allotment:
+                raise HTTPException(status_code=400, detail=f'"{d}" isn\'t one of the days on this invitation.')
+            try:
+                q = int(q)
+            except (TypeError, ValueError):
+                raise HTTPException(status_code=400, detail="Ticket counts must be whole numbers.")
+            if q < 0:
+                raise HTTPException(status_code=400, detail="Ticket counts can't be negative.")
+            if q > allotment[d]:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"That's more than your {allotment[d]} for {d} — use the request button to ask for extras.",
+                )
+            cleaned[d] = q
+        accepted = {d: q for d, q in cleaned.items() if q > 0}
+        if mode == "select":
+            total = sum(cleaned.values())
+            if total > (guest.party_size or 1):
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"You have {guest.party_size} tickets to place — that adds up to {total}.",
+                )
+        if not accepted:
+            raise HTTPException(status_code=400, detail="Pick at least one ticket, or decline instead.")
+        from app.schemas.guest import TicketAllotmentDayItem
+
+        seating.replace_guest_ticket_allotment(
+            db, guest.id, [TicketAllotmentDayItem(date=d, quantity=q) for d, q in sorted(accepted.items())]
+        )
+        guest.ticket_allotment_overridden = True
+        comp_tickets.shrink_guest_day_codes(db, guest, accepted)
+        guest.visit_date = next(iter(accepted)) if (mode == "select" and len(accepted) == 1) else None
 
     if payload.attending:
         # 'select'-mode guests choose their own day; validate against the
@@ -278,7 +328,12 @@ def request_more_tickets(token: str, payload: RSVPTicketRequestCreate, db: Sessi
     )
     if pending:
         raise HTTPException(status_code=400, detail="You already have a request waiting for the organizer.")
-    db.add(GuestTicketRequest(guest_id=guest.id, quantity=payload.quantity, note=payload.note or None))
+    req_date = (payload.date or "").strip() or None
+    if req_date:
+        allot = seating.effective_allotment(db, guest)
+        if allot and req_date not in allot:
+            raise HTTPException(status_code=400, detail=f'"{req_date}" isn\'t one of the days on this invitation.')
+    db.add(GuestTicketRequest(guest_id=guest.id, quantity=payload.quantity, date=req_date, note=payload.note or None))
     db.commit()
     return get_rsvp_info(token, db)
 

@@ -403,6 +403,7 @@ def list_ticket_requests(
             guest_email=g.email,
             current_party_size=g.party_size,
             quantity=req.quantity,
+            date=req.date,
             note=req.note,
             status=req.status,
             created_at=req.created_at,
@@ -438,12 +439,25 @@ def approve_ticket_request(
     if req.status != "pending":
         raise HTTPException(status_code=400, detail="This request was already resolved.")
 
-    new_party = guest.party_size + req.quantity
-    if guest.allocation_status == GuestAllocationStatus.CONFIRMED and guest.seating_category_id:
-        seating.check_capacity(
-            db, event_id, guest.seating_category_id, party_size=new_party, exclude_guest_id=guest.id
+    allot = seating.effective_allotment(db, guest)
+    if req.date and allot:
+        # Day-granted guest: approval grows THAT day's grant, not the
+        # party — the next mint tops up exactly that day's codes.
+        from app.schemas.guest import TicketAllotmentDayItem
+
+        bumped = dict(allot)
+        bumped[req.date] = bumped.get(req.date, 0) + req.quantity
+        seating.replace_guest_ticket_allotment(
+            db, guest.id, [TicketAllotmentDayItem(date=d, quantity=q) for d, q in sorted(bumped.items())]
         )
-    guest.party_size = new_party
+        guest.ticket_allotment_overridden = True
+    else:
+        new_party = guest.party_size + req.quantity
+        if guest.allocation_status == GuestAllocationStatus.CONFIRMED and guest.seating_category_id:
+            seating.check_capacity(
+                db, event_id, guest.seating_category_id, party_size=new_party, exclude_guest_id=guest.id
+            )
+        guest.party_size = new_party
     comp_tickets.mark_resolved(req, "approved")
 
     if (
@@ -459,7 +473,7 @@ def approve_ticket_request(
     db.refresh(req)
     return GuestTicketRequestResponse(
         id=req.id, guest_id=guest.id, guest_name=guest.name, guest_email=guest.email,
-        current_party_size=guest.party_size, quantity=req.quantity, note=req.note,
+        current_party_size=guest.party_size, quantity=req.quantity, date=req.date, note=req.note,
         status=req.status, created_at=req.created_at, resolved_at=req.resolved_at,
     )
 
@@ -487,7 +501,7 @@ def deny_ticket_request(
     db.refresh(req)
     return GuestTicketRequestResponse(
         id=req.id, guest_id=guest.id, guest_name=guest.name, guest_email=guest.email,
-        current_party_size=guest.party_size, quantity=req.quantity, note=req.note,
+        current_party_size=guest.party_size, quantity=req.quantity, date=req.date, note=req.note,
         status=req.status, created_at=req.created_at, resolved_at=req.resolved_at,
     )
 

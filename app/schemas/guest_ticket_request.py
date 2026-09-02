@@ -13,6 +13,7 @@ class GuestTicketRequestResponse(BaseModel):
     guest_email: str
     current_party_size: int
     quantity: int
+    date: Optional[str] = None  # day the extra tickets are for (day-granted guests)
     note: Optional[str] = None
     status: str
     created_at: datetime

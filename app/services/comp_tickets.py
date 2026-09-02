@@ -79,6 +79,34 @@ def event_days_for(db: Session, event_id) -> list[str]:
     return days
 
 
+def shrink_guest_day_codes(db: Session, guest: Guest, accepted: dict) -> int:
+    """
+    A guest accepted FEWER tickets than granted: void each day's excess
+    VALID dated codes beyond accepted[day] (days absent from `accepted`
+    drop to zero). Seatless codes void first, newest first, so a
+    hand-placed seat survives a shrink whenever the day keeps any
+    tickets. Voided codes read REFUNDED — the door already shows those
+    as DO-NOT-ADMIT, and derived availability frees any seat they held.
+    Undated (legacy) codes are never touched. Returns how many voided.
+    """
+    dated = [t for t in valid_comp_tickets(db, guest) if t.valid_date]
+    by_day: dict = {}
+    for t in dated:
+        by_day.setdefault(t.valid_date, []).append(t)
+    voided = 0
+    for day, tickets in by_day.items():
+        keep = max(0, int(accepted.get(day, 0)))
+        excess = len(tickets) - keep
+        if excess <= 0:
+            continue
+        # void order: seatless first, then seated; newest first within each
+        order = [t for t in tickets if t.seat_id is None][::-1] + [t for t in tickets if t.seat_id is not None][::-1]
+        for t in order[:excess]:
+            t.status = TicketStatus.REFUNDED
+            voided += 1
+    return voided
+
+
 def is_native_ticketing(db: Session, event_id) -> bool:
     """Comp ticket codes only mint for events selling through EventNXT —
     the rule as stated: 'if selling thru eventnxt then when RSVP is yes,
@@ -118,7 +146,7 @@ def issue_comp_tickets(db: Session, guest: Guest) -> list[Ticket]:
 
     allot = seating.effective_allotment(db, guest)
     mode = effective_guest_mode(db, guest, allot)
-    if days and allot and mode == "invite" and not has_undated:
+    if days and allot and mode in ("invite", "select") and not has_undated:
         # Invite with a per-day grant ("2 Thursday, 4 Saturday"): mint
         # exactly the granted quantity per granted day — dated codes,
         # idempotent per-day top-up, other days get nothing. Distributor

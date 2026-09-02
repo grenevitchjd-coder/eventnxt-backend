@@ -25,6 +25,9 @@ class GuestTicketRequest(Base):
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     guest_id = Column(UUID(as_uuid=True), ForeignKey("guests.id"), nullable=False, index=True)
     quantity = Column(Integer, nullable=False)
+    # Which day the extra tickets are for (day-granted guests); NULL =
+    # legacy whole-party request.
+    date = Column(String, nullable=True)
     note = Column(Text, nullable=True)
     status = Column(String, nullable=False, default="pending")
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)

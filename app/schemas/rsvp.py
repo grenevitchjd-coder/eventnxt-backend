@@ -1,7 +1,12 @@
 # eventnxt-backend: app/schemas/rsvp.py
-from typing import List, Literal, Optional
+from typing import Dict, List, Literal, Optional
 
 from pydantic import BaseModel, EmailStr, Field
+
+
+class DayGrantItem(BaseModel):
+    date: str
+    quantity: int
 
 
 class DayAllotment(BaseModel):
@@ -29,6 +34,9 @@ class RSVPInfoResponse(BaseModel):
     allocation_status: str
     visit_date: Optional[str] = None
     party_size: int
+    # Invite/select guests: their per-day grant (invite: what they were
+    # given; select: the offered days and per-day caps).
+    day_grants: Optional[List[DayGrantItem]] = None
 
     is_allotment_holder: bool
     day_allotments: Optional[List[DayAllotment]] = None
@@ -94,11 +102,15 @@ class RSVPRespondRequest(BaseModel):
     attending: bool
     # 'select'-mode guests choose their own day; ignored for other modes.
     visit_date: Optional[str] = None
+    # Per-day acceptance grid (invite: reduce-only against the grant;
+    # select: distribute up to party_size across the offered days).
+    day_quantities: Optional[Dict[str, int]] = None
 
 
 class RSVPTicketRequestCreate(BaseModel):
     quantity: int = Field(ge=1, le=10)
     note: Optional[str] = None
+    date: Optional[str] = None  # day-granted guests ask per day
 
 
 class RSVPDistributeRecipient(BaseModel):
