@@ -1,3 +1,4 @@
+"""eventnxt-backend: app/services/seating.py"""
 from fastapi import HTTPException
 from sqlalchemy import func, or_
 from sqlalchemy.orm import Session
@@ -49,6 +50,30 @@ def check_capacity(db: Session, event_id: str, category_id: str, party_size: int
         )
 
 
+def normalized_name(name) -> str:
+    """
+    The canonical form used everywhere a ticket-type NAME identifies a
+    day-family (fan-out coverage, pass creation, day-clone resolution):
+    trimmed, inner whitespace collapsed, lowercased. "Row 1 Patron " and
+    "row 1  patron" are the same family. Live pass links stay explicit
+    (pass_members FKs) — this only affects family DISCOVERY.
+    """
+    return " ".join(str(name or "").split()).lower()
+
+
+def name_family_filter(name):
+    """SQL predicate: ticket_types.name matches `name` after the same
+    normalization (btrim + collapse runs of whitespace + lower)."""
+    from sqlalchemy import func as sa_func
+
+    from app.models.ticket_type import TicketType
+
+    return (
+        sa_func.btrim(sa_func.regexp_replace(sa_func.lower(TicketType.name), r"\s+", " ", "g"))
+        == normalized_name(name)
+    )
+
+
 def pool_for_day(db: Session, base_pool_id, visit_date):
     """
     Multi-day events clone a pool per day ("Row 2", "Row 2 (10/10)", …)
@@ -76,7 +101,7 @@ def pool_for_day(db: Session, base_pool_id, visit_date):
         db.query(TicketType)
         .filter(
             TicketType.event_id == base_type.event_id,
-            TicketType.name == base_type.name,
+            name_family_filter(base_type.name),
             TicketType.valid_date == visit_date,
             TicketType.seating_category_id.isnot(None),
         )

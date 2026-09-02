@@ -17,6 +17,7 @@ from app.schemas.ticketing import TicketTypeAdminResponse, TicketTypeCreateOrUpd
 from app.services.deps import CurrentUser
 from app.services.event_access import require_event_access
 from app.services.comp_tickets import event_days_for, get_event_settings_row
+from app.services.seating import name_family_filter, normalized_name
 from app.services.ticketing import availability_for
 
 router = APIRouter(tags=["ticket-types"])
@@ -209,7 +210,7 @@ def fan_out_ticket_type(
     covered = {
         d
         for (d,) in db.query(TicketType.valid_date)
-        .filter(TicketType.event_id == event_id, TicketType.name == template.name, TicketType.valid_date.isnot(None))
+        .filter(TicketType.event_id == event_id, name_family_filter(template.name), TicketType.valid_date.isnot(None))
         .all()
     }
     template_pool = (
@@ -283,6 +284,41 @@ def fan_out_ticket_type(
         db.refresh(c)
     return _with_counts(db, created) if created else []
 
+def _seated_pass_family(db: Session, event_id: str, template: TicketType) -> list[TicketType]:
+    """
+    The dated, seated family a pass can ride on, resolved from a nightly
+    template by NORMALIZED name (trim / collapse whitespace / lowercase —
+    a stray space can't split a family). Raises buyer-readable 400s when
+    the family isn't pass-shaped: fewer than two distinct days, any night
+    not assigned-seat, or an active pass already covering a member.
+    """
+    family = (
+        db.query(TicketType)
+        .filter(TicketType.event_id == event_id, name_family_filter(template.name), TicketType.valid_date.isnot(None))
+        .order_by(TicketType.valid_date)
+        .all()
+    )
+    if len({m.valid_date for m in family}) < 2:
+        raise HTTPException(status_code=400, detail=f'"{template.name}" only exists for one day — fan it out first.')
+    pools = (
+        db.query(SeatingCategory).filter(SeatingCategory.id.in_([m.seating_category_id for m in family if m.seating_category_id])).all()
+    )
+    if len(pools) != len(family) or any(p.sales_grain != "seat" for p in pools):
+        raise HTTPException(
+            status_code=400,
+            detail="All-days passes currently cover assigned-seat families — for GA or row packages, create a whole-event type instead.",
+        )
+    already = (
+        db.query(PassMember.id)
+        .join(TicketType, TicketType.id == PassMember.pass_type_id)
+        .filter(PassMember.member_type_id.in_([m.id for m in family]), TicketType.is_active.is_(True))
+        .first()
+    )
+    if already:
+        raise HTTPException(status_code=400, detail=f'"{template.name}" already has an active all-days pass.')
+    return family
+
+
 class PassCreateRequest(BaseModel):
     name: str
     price_cents: int = Field(ge=0)
@@ -317,30 +353,7 @@ def create_pass_from_type(
     )
     if not template or not template.valid_date:
         raise HTTPException(status_code=404, detail="Pass templates are day-specific ticket types.")
-    family = (
-        db.query(TicketType)
-        .filter(TicketType.event_id == event_id, TicketType.name == template.name, TicketType.valid_date.isnot(None))
-        .order_by(TicketType.valid_date)
-        .all()
-    )
-    if len({m.valid_date for m in family}) < 2:
-        raise HTTPException(status_code=400, detail=f'"{template.name}" only exists for one day — fan it out first.')
-    pools = (
-        db.query(SeatingCategory).filter(SeatingCategory.id.in_([m.seating_category_id for m in family if m.seating_category_id])).all()
-    )
-    if len(pools) != len(family) or any(p.sales_grain != "seat" for p in pools):
-        raise HTTPException(
-            status_code=400,
-            detail="All-days passes currently cover assigned-seat families — for GA or row packages, create a whole-event type instead.",
-        )
-    already = (
-        db.query(PassMember.id)
-        .join(TicketType, TicketType.id == PassMember.pass_type_id)
-        .filter(PassMember.member_type_id.in_([m.id for m in family]), TicketType.is_active.is_(True))
-        .first()
-    )
-    if already:
-        raise HTTPException(status_code=400, detail=f'"{template.name}" already has an active all-days pass.')
+    family = _seated_pass_family(db, event_id, template)
 
     pass_type = TicketType(
         event_id=event_id,
@@ -365,3 +378,114 @@ def create_pass_from_type(
     db.commit()
     db.refresh(pass_type)
     return _with_counts(db, [pass_type])[0]
+
+class ConvertToPassRequest(BaseModel):
+    template_type_id: str  # any nightly member of the family to link to
+
+
+@router.post("/events/{event_id}/ticket-types/{ticket_type_id}/convert-to-pass", response_model=TicketTypeAdminResponse)
+def convert_type_to_pass(
+    event_id: str,
+    ticket_type_id: str,
+    payload: ConvertToPassRequest,
+    db: Session = Depends(get_db),
+    user: CurrentUser = Depends(require_event_access),
+):
+    """
+    Retro-fit for "the all-days package was made first": take a
+    STANDALONE undated type (own pool, own duplicate seats) and rewire it
+    into a derived pass on an existing nightly seated family — same
+    physical chairs as the nights, no second inventory. Keeps the type's
+    name / price / quantity-cap / max-per-order; discards its own pool,
+    sections, and seats (they were duplicates of the real room).
+
+    Refused whenever throwing the pool away would lose truth: anything
+    sold or held on the type, seats blocked or assigned to guests, guests
+    or seating priorities pointing at the pool, or the pool shared by
+    another ticket type (then we only detach, never delete). The family
+    itself is validated exactly like the All-days-pass button
+    (normalized-name match, 2+ days, all assigned-seat, no active pass).
+    """
+    from app.models.guest import Guest
+    from app.models.guest_type_seating_priority import GuestTypeSeatingPriority
+    from app.models.seat import Seat
+    from app.models.ticket import Ticket
+
+    row = get_event_settings_row(db, event_id)
+    if not row or row.ticket_span != "mixed":
+        raise HTTPException(status_code=400, detail="All-days passes need the event span set to mixed (Event settings).")
+
+    ticket_type = (
+        db.query(TicketType)
+        .filter(TicketType.id == ticket_type_id, TicketType.event_id == event_id)
+        .first()
+    )
+    if not ticket_type:
+        raise HTTPException(status_code=404, detail="Ticket type not found.")
+    if ticket_type.valid_date:
+        raise HTTPException(status_code=400, detail="Only whole-event (undated) types can become passes — this one is day-specific.")
+    if db.query(PassMember.id).filter(PassMember.pass_type_id == ticket_type.id).first():
+        raise HTTPException(status_code=400, detail="This type is already an all-days pass.")
+    if db.query(PassMember.id).filter(PassMember.member_type_id == ticket_type.id).first():
+        raise HTTPException(status_code=400, detail="This type is a night inside an existing pass — it can't become one.")
+
+    # Nothing may have been sold or held against the standalone identity:
+    # its codes and holds point at seats that are about to stop existing.
+    if db.query(Ticket.id).filter(Ticket.ticket_type_id == ticket_type.id).first():
+        raise HTTPException(status_code=400, detail="Tickets have already been issued on this type — it can't be converted. Deactivate it and use the All-days pass button instead.")
+    if db.query(OrderItem.id).filter(OrderItem.ticket_type_id == ticket_type.id).first():
+        raise HTTPException(status_code=400, detail="This type has orders (including pending holds) — it can't be converted. Deactivate it and use the All-days pass button instead.")
+
+    template = (
+        db.query(TicketType)
+        .filter(TicketType.id == payload.template_type_id, TicketType.event_id == event_id)
+        .first()
+    )
+    if not template or not template.valid_date:
+        raise HTTPException(status_code=404, detail="Pick a day-specific nightly type to link to.")
+    family = _seated_pass_family(db, event_id, template)
+
+    pool = (
+        db.query(SeatingCategory).filter(SeatingCategory.id == ticket_type.seating_category_id).first()
+        if ticket_type.seating_category_id
+        else None
+    )
+    if pool:
+        if db.query(Guest.id).filter(Guest.seating_category_id == pool.id).first():
+            raise HTTPException(status_code=400, detail=f'Guests are placed in "{pool.name}" — move them to the nightly pools first.')
+        if db.query(GuestTypeSeatingPriority.id).filter(GuestTypeSeatingPriority.seating_category_id == pool.id).first():
+            raise HTTPException(status_code=400, detail=f'Guest-type seating priorities target "{pool.name}" — repoint them at the nightly pools first.')
+        blocked = (
+            db.query(Seat.id)
+            .filter(Seat.seating_category_id == pool.id, (Seat.is_blocked.is_(True)) | (Seat.guest_id.isnot(None)))
+            .first()
+        )
+        if blocked:
+            raise HTTPException(status_code=400, detail=f'"{pool.name}" has reserved or guest-assigned seats — release them first (holds belong on each night\'s own seats).')
+
+        shared_by_other = (
+            db.query(TicketType.id)
+            .filter(TicketType.seating_category_id == pool.id, TicketType.id != ticket_type.id)
+            .first()
+        )
+        # Detach first (FK to the pool must be gone before the pool is),
+        # then remove the duplicate room — children before parent. With
+        # autoflush off, the bulk deletes hit the DB immediately, so the
+        # detach is flushed explicitly ahead of them.
+        ticket_type.seating_category_id = None
+        db.flush()
+        if not shared_by_other:
+            db.query(Seat).filter(Seat.seating_category_id == pool.id).delete()
+            db.query(ZoneSection).filter(ZoneSection.seating_category_id == pool.id).delete()
+            db.query(SeatingCategory).filter(SeatingCategory.id == pool.id).delete()
+    else:
+        ticket_type.seating_category_id = None
+
+    ticket_type.admits = 1  # passes are seat-picked: one admission per seat
+    ticket_type.valid_date = None
+    db.flush()
+    for m in family:
+        db.add(PassMember(pass_type_id=ticket_type.id, member_type_id=m.id))
+    db.commit()
+    db.refresh(ticket_type)
+    return _with_counts(db, [ticket_type])[0]
