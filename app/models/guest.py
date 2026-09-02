@@ -84,6 +84,10 @@ class Guest(Base):
     # 1 — a distributor can bump this for a single named recipient
     # instead of creating duplicate rows under the same name).
     party_size = Column(Integer, nullable=False, default=1)
+
+    # When this guest's heads block public sales: 'now' (pending +
+    # confirmed count — the default), 'on_confirm', or 'later'.
+    hold_timing = Column(String, nullable=False, default="now")
     # Which specific day this guest's own ticket/attendance is for.
     visit_date = Column(String, nullable=True)
     # Set when this guest was created by someone else's distribution —

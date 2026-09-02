@@ -20,6 +20,7 @@ class GuestCreateRequest(BaseModel):
     allocation_status: Literal["confirmed", "pending", "declined"] = "confirmed"
     party_size: int = Field(default=1, ge=1)
     visit_date: Optional[str] = None
+    hold_timing: Literal["now", "on_confirm", "later"] = "now"
     perks: Optional[str] = None
     comments: Optional[str] = None
     ticket_allotment: Optional[List[TicketAllotmentDayItem]] = None
@@ -35,6 +36,7 @@ class GuestUpdateRequest(BaseModel):
     allocation_status: Literal["confirmed", "pending", "declined"] = "confirmed"
     party_size: int = Field(default=1, ge=1)
     visit_date: Optional[str] = None
+    hold_timing: Literal["now", "on_confirm", "later"] = "now"
     perks: Optional[str] = None
     comments: Optional[str] = None
     ticket_allotment: Optional[List[TicketAllotmentDayItem]] = None
@@ -58,6 +60,7 @@ class GuestResponse(BaseModel):
     allotment_total: int = 0
     allotment_distributed: int = 0
     visit_date: Optional[str] = None
+    hold_timing: Literal["now", "on_confirm", "later"] = "now"
     allocated_by_guest_id: Optional[uuid.UUID] = None
     rsvp_token: str
     rsvp_confirmed: Optional[str] = None

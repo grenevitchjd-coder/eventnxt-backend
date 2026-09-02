@@ -584,8 +584,16 @@ def lock_and_claim_section(db: Session, *, ticket_type, quantity: int, zone_sect
         raise ValueError(f'That section doesn\'t belong to "{ticket_type.name}" — refresh and choose again.')
     heads_wanted = quantity * (ticket_type.admits or 1)
     heads_taken = section_heads_taken(db, section.id)
-    if heads_taken + heads_wanted > section.capacity:
-        left = max(section.capacity - heads_taken, 0)
+    # Comp holds: confirmed guests and pending hold-now guests protect
+    # their heads in this section — buyers see only what's genuinely
+    # left. Day-aware via the pool's own day (see seating.guest_hold_heads).
+    from app.models.seating_category import SeatingCategory as _SC
+    from app.services import seating as seating_service
+
+    _cat = db.query(_SC).filter(_SC.id == section.seating_category_id).first()
+    held_by_guests = seating_service.guest_hold_heads(db, _cat, section.section_label) if _cat else 0
+    if heads_taken + held_by_guests + heads_wanted > section.capacity:
+        left = max(section.capacity - heads_taken - held_by_guests, 0)
         raise ValueError(
             f"Section {section.section_label} only has {left} left — someone may have beaten you to it. "
             "Pick another section or adjust the quantity."

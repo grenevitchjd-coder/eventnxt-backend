@@ -73,6 +73,7 @@ def _serialize_guest(db: Session, guest: Guest) -> GuestResponse:
         allotment_total=allotment_total,
         allotment_distributed=allotment_distributed,
         visit_date=guest.visit_date,
+        hold_timing=guest.hold_timing or "now",
         allocated_by_guest_id=guest.allocated_by_guest_id,
         rsvp_token=guest.rsvp_token,
         rsvp_confirmed=guest.rsvp_confirmed,
@@ -104,7 +105,7 @@ def create_guest(
         # as before, regardless of what the guest type's priority list says.
         effective_seating_category_id = payload.seating_category_id
         effective_section_label = (payload.section_label or "").strip() or None
-        if payload.allocation_status == "confirmed":
+        if payload.allocation_status == "confirmed" or payload.hold_timing == "now":
             seating.check_capacity(db, event_id, effective_seating_category_id, party_size=payload.party_size)
         else:
             category = (
@@ -116,8 +117,9 @@ def create_guest(
                 raise HTTPException(status_code=404, detail="Seating category not found for this event.")
         if effective_section_label:
             # Section-level hand placement: verify the label and its room
-            # (only bites for confirmed guests — pending holds nothing).
-            if payload.allocation_status == "confirmed":
+            # (bites for confirmed guests AND pending hold-now guests —
+            # holding now means the room must actually exist).
+            if payload.allocation_status == "confirmed" or payload.hold_timing == "now":
                 seating.check_section_capacity(
                     db, event_id, payload.seating_category_id, effective_section_label,
                     party_size=payload.party_size,
@@ -160,6 +162,7 @@ def create_guest(
         allocation_status=GuestAllocationStatus(payload.allocation_status),
         party_size=payload.party_size,
         visit_date=payload.visit_date,
+        hold_timing=payload.hold_timing,
         perks=payload.perks,
         comments=payload.comments,
         ticket_allotment_overridden=payload.ticket_allotment is not None,
@@ -233,7 +236,7 @@ def update_guest(
         and guest.party_size == payload.party_size
     )
     new_section_label = (payload.section_label or "").strip() or None
-    if payload.seating_category_id and payload.allocation_status == "confirmed" and not already_confirmed_here:
+    if payload.seating_category_id and (payload.allocation_status == "confirmed" or payload.hold_timing == "now") and not already_confirmed_here:
         seating.check_capacity(
             db, event_id, payload.seating_category_id, party_size=payload.party_size, exclude_guest_id=guest.id
         )
@@ -246,7 +249,7 @@ def update_guest(
         if not category:
             raise HTTPException(status_code=404, detail="Seating category not found for this event.")
 
-    if payload.seating_category_id and new_section_label and payload.allocation_status == "confirmed":
+    if payload.seating_category_id and new_section_label and (payload.allocation_status == "confirmed" or payload.hold_timing == "now"):
         section_unchanged = (
             already_confirmed_here and (guest.section_label or None) == new_section_label
         )
@@ -264,6 +267,7 @@ def update_guest(
     guest.allocation_status = GuestAllocationStatus(payload.allocation_status)
     guest.party_size = payload.party_size
     guest.visit_date = payload.visit_date
+    guest.hold_timing = payload.hold_timing
     guest.perks = payload.perks
     guest.comments = payload.comments
     guest.guest_mode = payload.guest_mode

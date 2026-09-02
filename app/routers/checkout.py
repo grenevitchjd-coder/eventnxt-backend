@@ -43,6 +43,7 @@ from app.schemas.ticketing import (
     PublicSeatResponse,
     PublicSeatSectionResponse,
 )
+from app.services import seating
 from app.services import seats as seats_service
 from app.services import ticketing
 from app.services.native_sales import record_native_sales
@@ -80,6 +81,7 @@ def list_public_ticket_types(slug: str, db: Session = Depends(get_db)):
     pool_ids = [t.seating_category_id for t in ticket_types if t.seating_category_id]
     pools = db.query(SeatingCategory).filter(SeatingCategory.id.in_(pool_ids)).all() if pool_ids else []
     assigned_pool_ids = {c.id for c in pools if c.sales_grain == "seat"}
+    pools_by_id = {c.id: c for c in pools}
     section_pool_ids = seats_service.section_required_pool_ids(db, pool_ids)
     sections_by_pool = {}
     if section_pool_ids:
@@ -94,7 +96,14 @@ def list_public_ticket_types(slug: str, db: Session = Depends(get_db)):
                     id=sec.id,
                     section_label=sec.section_label,
                     row_label=sec.row_label,
-                    remaining=max(sec.capacity - seats_service.section_heads_taken(db, sec.id), 0),
+                    remaining=max(
+                        sec.capacity
+                        - seats_service.section_heads_taken(db, sec.id)
+                        # comp holds (confirmed + pending hold-now) — the
+                        # number shown must match what checkout will allow
+                        - seating.guest_hold_heads(db, pools_by_id[sec.seating_category_id], sec.section_label),
+                        0,
+                    ),
                 )
             )
     pass_ids = set(ticketing.pass_members_for(db, [t.id for t in ticket_types]).keys())

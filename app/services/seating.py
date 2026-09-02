@@ -1,5 +1,5 @@
 from fastapi import HTTPException
-from sqlalchemy import func
+from sqlalchemy import func, or_
 from sqlalchemy.orm import Session
 
 from app.models.guest import Guest, GuestAllocationStatus
@@ -94,6 +94,78 @@ def resolve_seating_from_priorities(db: Session, event_id: str, guest_type_id: s
     return category_id
 
 
+def _pool_day(db: Session, category_id) -> str | None:
+    """The day a pool sells for — read from any dated ticket type selling
+    it (the fan-out shape). None for undated/single-day pools."""
+    from app.models.ticket_type import TicketType
+
+    row = (
+        db.query(TicketType.valid_date)
+        .filter(TicketType.seating_category_id == category_id, TicketType.valid_date.isnot(None))
+        .first()
+    )
+    return row[0] if row else None
+
+
+def guest_hold_heads(db: Session, category: SeatingCategory, section_label: str | None = None, exclude_guest_id=None) -> int:
+    """
+    Heads comps hold against this pool (optionally one section of it),
+    as the SALES side must see them: confirmed guests always; pending
+    guests when their hold_timing is 'now'. Day-aware — a guest whose
+    home pool is a same-family sibling (e.g. targeted at Friday's "Row
+    2" while this is Saturday's clone) counts here with their per-day
+    grant for THIS pool's day; visit-dated guests count only on their
+    day; whole-event guests count party_size everywhere. Guests holding
+    actual seats are excluded — their blocked seats already consume.
+    """
+    from app.models.seat import Seat
+
+    day = _pool_day(db, category.id)
+    q = db.query(Guest).filter(
+        Guest.event_id == category.event_id,
+        Guest.seating_category_id.isnot(None),
+        or_(
+            Guest.allocation_status == GuestAllocationStatus.CONFIRMED,
+            (Guest.allocation_status == GuestAllocationStatus.PENDING) & (Guest.hold_timing == "now"),
+        ),
+    )
+    if section_label is not None:
+        q = q.filter(Guest.section_label == section_label)
+    if exclude_guest_id:
+        q = q.filter(Guest.id != exclude_guest_id)
+    guests = q.all()
+    if not guests:
+        return 0
+    seated_ids = {
+        gid
+        for (gid,) in db.query(Seat.guest_id).filter(Seat.guest_id.in_([g.id for g in guests])).all()
+        if gid
+    }
+    total = 0
+    for g in guests:
+        if g.id in seated_ids:
+            continue
+        home = g.seating_category_id
+        if str(home) != str(category.id):
+            if day is None:
+                continue
+            mapped = pool_for_day(db, home, day)
+            if mapped is None or str(mapped) != str(category.id):
+                continue
+        allot = effective_allotment(db, g)
+        if day is not None:
+            if allot:
+                heads = int(allot.get(day, 0))
+            elif g.visit_date:
+                heads = (g.party_size or 1) if g.visit_date == day else 0
+            else:
+                heads = g.party_size or 1
+        else:
+            heads = (sum(allot.values()) if allot else (g.party_size or 1))
+        total += heads
+    return total
+
+
 def section_room_for_comps(db: Session, category: SeatingCategory, section_label: str, exclude_guest_id=None) -> int:
     """
     How many more comp heads fit in one section of a pool. The section's
@@ -122,7 +194,12 @@ def section_room_for_comps(db: Session, category: SeatingCategory, section_label
     comp_q = db.query(func.coalesce(func.sum(Guest.party_size), 0)).filter(
         Guest.seating_category_id == category.id,
         Guest.section_label == section_label,
-        Guest.allocation_status == GuestAllocationStatus.CONFIRMED,
+        or_(
+            Guest.allocation_status == GuestAllocationStatus.CONFIRMED,
+            # hold-now guests protect their section from the moment
+            # they're saved — pending or not.
+            (Guest.allocation_status == GuestAllocationStatus.PENDING) & (Guest.hold_timing == "now"),
+        ),
     )
     if exclude_guest_id:
         comp_q = comp_q.filter(Guest.id != exclude_guest_id)
