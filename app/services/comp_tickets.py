@@ -222,6 +222,54 @@ def issue_comp_tickets(db: Session, guest: Guest) -> list[Ticket]:
     return existing + minted
 
 
+def sync_guest_tickets(db: Session, guest: Guest) -> tuple[int, int]:
+    """
+    Organizer's re-true: make the guest's VALID codes match their
+    CURRENT shape in both directions — void what's no longer granted
+    (day swaps, reductions) and mint what's missing (raises, new days).
+    Returns (minted, voided).
+
+    Target shape: per-day grant when they have one; else their visit
+    day × party; else (multi-day event) party per event day. Single-day
+    events manage the undated count to party_size. Legacy guests
+    holding undated codes at a multi-day event are left alone on the
+    void side — an undated code admits any day, so there's nothing
+    day-shaped to reconcile; the top-up side still applies.
+    """
+    days = event_days_for(db, guest.event_id)
+    from app.services import seating
+
+    allot = seating.effective_allotment(db, guest)
+    mode = effective_guest_mode(db, guest, allot)
+    existing = valid_comp_tickets(db, guest)
+    has_undated = any(t.valid_date is None for t in existing)
+    voided = 0
+    if days and not has_undated:
+        if allot and mode in ("invite", "select"):
+            target = {d: q for d, q in allot.items() if d in days}
+        elif guest.visit_date:
+            target = {guest.visit_date: guest.party_size or 1}
+        else:
+            target = {d: (guest.party_size or 1) for d in days}
+        voided = shrink_guest_day_codes(db, guest, target)
+        # autoflush is OFF: the voids above must land before the top-up
+        # below re-queries VALID codes, or it counts ghosts.
+        db.flush()
+    elif not days:
+        undated = [t for t in existing if t.valid_date is None]
+        excess = len(undated) - (guest.party_size or 1)
+        if excess > 0:
+            order = [t for t in undated if t.seat_id is None][::-1] + [t for t in undated if t.seat_id is not None][::-1]
+            for t in order[:excess]:
+                t.status = TicketStatus.REFUNDED
+                voided += 1
+    db.flush()  # autoflush OFF — voids must land before the top-up counts
+    before = len(valid_comp_tickets(db, guest))
+    issue_comp_tickets(db, guest)
+    minted = len(valid_comp_tickets(db, guest)) - before
+    return minted, voided
+
+
 def send_recipient_invite_email(db: Session, child: Guest, parent: Guest) -> bool:
     """
     Tell a distribution recipient they've been given tickets, with their
@@ -264,7 +312,7 @@ def send_recipient_invite_email(db: Session, child: Guest, parent: Guest) -> boo
         return False
 
 
-def send_comp_ticket_email(db: Session, guest: Guest, tickets: list[Ticket]) -> bool:
+def send_comp_ticket_email(db: Session, guest: Guest, tickets: list[Ticket], note: str | None = None) -> bool:
     """
     Email the guest their admission code(s). Best-effort: a failed or
     unconfigured send never blocks the RSVP — the tickets exist either
@@ -309,9 +357,10 @@ def send_comp_ticket_email(db: Session, guest: Guest, tickets: list[Ticket]) -> 
     section_note = (
         f"\nSeating: Section {guest.section_label}" if guest.section_label and not seat_ids else ""
     )
+    note_text = f"\n\n{note.strip()}" if note and note.strip() else ""
     text = (
         f"Hi {guest.name},\n\n"
-        f"You're confirmed for {event_name}.{when}{section_note}\n\n"
+        f"You're confirmed for {event_name}.{when}{section_note}{note_text}\n\n"
         f"Your admission code{plural} — show at the door:\n{codes}\n"
         f"{page}\n\n"
         f"See you there!"
@@ -328,8 +377,15 @@ def send_comp_ticket_email(db: Session, guest: Guest, tickets: list[Ticket]) -> 
         + f"</td></tr>"
         for t in tickets
     )
+    note_html = (
+        f"<p style='background:#FDF6E3;border-left:4px solid #B4890A;padding:8px 12px'><strong>{note.strip()}</strong></p>"
+        if note and note.strip()
+        else ""
+    )
     html = (
         f"<p>Hi {guest.name},</p>"
+        + note_html
+        +
         f"<p>You're confirmed for <strong>{event_name}</strong>.{(' Date: ' + str(guest.visit_date)) if guest.visit_date else ''}"
         f"{(' Seating: Section ' + guest.section_label + '.') if guest.section_label and not seat_ids else ''}</p>"
         f"<p>Your admission code{plural} — show at the door (scannable or typed):</p>"

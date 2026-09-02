@@ -2,6 +2,9 @@
 import secrets
 from datetime import datetime, timezone
 
+from typing import Optional
+
+from pydantic import BaseModel
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
@@ -511,6 +514,47 @@ def deny_ticket_request(
         current_party_size=guest.party_size, quantity=req.quantity, date=req.date, note=req.note,
         status=req.status, created_at=req.created_at, resolved_at=req.resolved_at,
     )
+
+
+class SyncTicketsRequest(BaseModel):
+    note: Optional[str] = None  # highlighted in the resent email ("You've been upgraded to Row 1!")
+    resend: bool = True
+
+
+@router.post("/{guest_id}/sync-tickets", response_model=GuestResponse)
+def sync_guest_tickets(
+    event_id: str,
+    guest_id: str,
+    payload: SyncTicketsRequest,
+    db: Session = Depends(get_db),
+    user: CurrentUser = Depends(require_event_access),
+):
+    """
+    Re-true a guest's admission codes to their CURRENT shape, both
+    directions — organizer changed their days, quantities, or seats, and
+    this makes the codes match: excess voided (seatless first), missing
+    minted, seats restamped, and (by default) the fresh set emailed with
+    an optional highlighted note ("You've been upgraded to front row!").
+    """
+    guest = db.query(Guest).filter(Guest.id == guest_id, Guest.event_id == event_id).first()
+    if not guest:
+        raise HTTPException(status_code=404, detail="Guest not found for this event.")
+    if not comp_tickets.is_native_ticketing(db, event_id):
+        raise HTTPException(
+            status_code=400,
+            detail="Comp ticket codes only exist for events selling through EventNXT (see Event settings).",
+        )
+    if guest.allocation_status != GuestAllocationStatus.CONFIRMED:
+        raise HTTPException(status_code=400, detail="Sync is for confirmed guests — confirm them first (or use Send ticket).")
+    minted, voided = comp_tickets.sync_guest_tickets(db, guest)
+    db.flush()
+    tickets = comp_tickets.valid_comp_tickets(db, guest)
+    if payload.resend and tickets:
+        comp_tickets.send_comp_ticket_email(db, guest, tickets, note=payload.note)
+    db.commit()
+    db.refresh(guest)
+    resp = _serialize_guest(db, guest)
+    return resp
 
 
 @router.delete("/{guest_id}", status_code=204)
