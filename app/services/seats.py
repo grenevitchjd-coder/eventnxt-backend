@@ -218,14 +218,35 @@ def restamp_guest_tickets(db: Session, guest) -> None:
             t.seat_id = None
     carried = {t.seat_id for t in tickets if t.seat_id}
     free_seats = [s for s in assigned if s.id not in carried]
-    # Multi-day guard: a seat lives in ONE night's pool, so it only
-    # stamps onto codes for the guest's own day (or undated codes).
-    # Whole-event comps with per-day codes keep other days unstamped
-    # rather than wrongly stamped.
-    stampable = lambda t: t.valid_date is None or t.valid_date == guest.visit_date  # noqa: E731
-    for t in tickets:
-        if t.seat_id is None and stampable(t) and free_seats:
-            t.seat_id = free_seats.pop(0).id
+    # Multi-day guard: a seat lives in ONE night's pool, so it stamps
+    # onto a code for THAT night. The pool's night is read from any
+    # dated ticket type selling it (the fan-out shape); a pool no dated
+    # type points at has no night, and falls back to the old rule
+    # (undated codes, or the guest's own visit day). Whole-event and
+    # per-day-granted comps thus get each seat on the right day's code.
+    from app.models.ticket_type import TicketType
+
+    pool_ids = {s.seating_category_id for s in assigned}
+    pool_day = {}
+    if pool_ids:
+        for cat_id, vd in (
+            db.query(TicketType.seating_category_id, TicketType.valid_date)
+            .filter(TicketType.seating_category_id.in_(pool_ids), TicketType.valid_date.isnot(None))
+            .all()
+        ):
+            pool_day.setdefault(cat_id, vd)
+
+    def stampable(t, seat):
+        day = pool_day.get(seat.seating_category_id)
+        if day is not None:
+            return t.valid_date == day or t.valid_date is None
+        return t.valid_date is None or t.valid_date == guest.visit_date
+
+    for seat in list(free_seats):
+        target = next((t for t in tickets if t.seat_id is None and stampable(t, seat)), None)
+        if target is not None:
+            target.seat_id = seat.id
+            free_seats.remove(seat)
 
 
 def assign_guest_seats(db: Session, *, guest, seat_ids: list[uuid.UUID]) -> list[Seat]:
@@ -262,11 +283,25 @@ def assign_guest_seats(db: Session, *, guest, seat_ids: list[uuid.UUID]) -> list
         raise HTTPException(status_code=404, detail="One of those seats no longer exists — refresh and try again.")
 
     wanted = [by_id[sid] for sid in seat_ids]
+    # Multi-day: a granted guest's seats live in SEVERAL nightly pools
+    # (Friday's Row 1, Saturday's Row 1 clone…), so seats may come from
+    # any pool of this event — hand-placement is an explicit organizer
+    # act, and the conflict/blocked checks below still protect every
+    # seat. The guest's own seating_category_id stays their "home" area
+    # for capacity math and the UI's seat expander.
+    from app.models.seating_category import SeatingCategory as _SC
+
+    pool_events = {
+        cid: eid
+        for (cid, eid) in db.query(_SC.id, _SC.event_id)
+        .filter(_SC.id.in_({s.seating_category_id for s in wanted}))
+        .all()
+    }
     for seat in wanted:
-        if seat.seating_category_id != guest.seating_category_id:
+        if str(pool_events.get(seat.seating_category_id)) != str(guest.event_id):
             raise HTTPException(
                 status_code=400,
-                detail=f"{seat.label} isn't in {guest.name}'s seating area — move the guest to that area first.",
+                detail=f"{seat.label} isn't part of this event's seating.",
             )
         if seat.guest_id is not None and seat.guest_id != guest.id:
             raise HTTPException(status_code=400, detail=f"{seat.label} is already assigned to another guest.")

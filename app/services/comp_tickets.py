@@ -113,7 +113,35 @@ def issue_comp_tickets(db: Session, guest: Guest) -> list[Ticket]:
     minted = []
     days = event_days_for(db, guest.event_id)
     has_undated = any(t.valid_date is None for t in existing)
-    if days and not guest.visit_date and not has_undated:
+
+    from app.services import seating
+
+    allot = seating.effective_allotment(db, guest)
+    mode = effective_guest_mode(db, guest, allot)
+    if days and allot and mode == "invite" and not has_undated:
+        # Invite with a per-day grant ("2 Thursday, 4 Saturday"): mint
+        # exactly the granted quantity per granted day — dated codes,
+        # idempotent per-day top-up, other days get nothing. Distributor
+        # allotments never take this path (their allotment is a budget
+        # for recipients, not tickets for themselves), and legacy
+        # undated holders keep any-day codes untouched.
+        by_day: dict = {}
+        for t in existing:
+            by_day[t.valid_date] = by_day.get(t.valid_date, 0) + 1
+        for day, qty in sorted(allot.items()):
+            if day not in days:
+                continue  # a stale grant outside the event's days mints nothing
+            for _ in range(max(0, qty - by_day.get(day, 0))):
+                t = Ticket(
+                    guest_id=guest.id,
+                    event_id=guest.event_id,
+                    code=generate_ticket_code(),
+                    status=TicketStatus.VALID,
+                    valid_date=day,
+                )
+                db.add(t)
+                minted.append(t)
+    elif days and not guest.visit_date and not has_undated:
         # Whole-event comp at a multi-day event: party_size dated codes
         # PER DAY — the guest walks in every day on that day's code,
         # same once-only door semantics as everything else. Idempotent

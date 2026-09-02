@@ -29,6 +29,23 @@ from app.services.event_access import require_event_access
 router = APIRouter(prefix="/events/{event_id}/guests", tags=["guests"])
 
 
+def _validate_allotment_days(db: Session, event_id: str, items) -> None:
+    """Grant days must be real event days once the event has a day list —
+    a typo'd date would otherwise mint nothing and look like a bug."""
+    if not items:
+        return
+    from app.services.comp_tickets import event_days_for
+
+    days = event_days_for(db, event_id)
+    if not days:
+        return
+    bad = [i.date for i in items if i.date not in days]
+    if bad:
+        raise HTTPException(
+            status_code=400,
+            detail=f'Allotment day "{bad[0]}" isn\'t one of this event\'s days ({days[0]} to {days[-1]}).',
+        )
+
 def _serialize_guest(db: Session, guest: Guest) -> GuestResponse:
     """
     GuestResponse.ticket_allotment isn't a raw column — it's this guest's
@@ -153,6 +170,7 @@ def create_guest(
     db.flush()  # assigns guest.id without committing, needed for the FK below
 
     if payload.ticket_allotment is not None:
+        _validate_allotment_days(db, event_id, payload.ticket_allotment)
         seating.replace_guest_ticket_allotment(db, guest.id, payload.ticket_allotment)
 
     # Auto-send delivery (Event settings): the moment an invite/select
@@ -251,6 +269,7 @@ def update_guest(
     guest.guest_mode = payload.guest_mode
 
     if payload.ticket_allotment is not None:
+        _validate_allotment_days(db, event_id, payload.ticket_allotment)
         guest.ticket_allotment_overridden = True
         seating.replace_guest_ticket_allotment(db, guest.id, payload.ticket_allotment)
 
