@@ -73,6 +73,7 @@ class GuestResponse(BaseModel):
     ticket_count: int = 0
     seat_labels: List[str] = []  # assigned seats, display order
     link_sent_at: Optional[datetime] = None
+    tickets_sent_at: Optional[datetime] = None
     created_at: datetime
 
     class Config:
@@ -87,4 +88,7 @@ class GuestSeatsAssignRequest(BaseModel):
 
 
 class GuestSentStatusRequest(BaseModel):
+    # Which manual marker to flip: the RSVP-link one (default, the
+    # original behavior) or the external-ticketing tickets-sent one.
+    marker: Literal["link", "tickets"] = "link"
     sent: bool

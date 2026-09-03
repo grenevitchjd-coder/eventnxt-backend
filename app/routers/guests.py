@@ -87,6 +87,7 @@ def _serialize_guest(db: Session, guest: Guest) -> GuestResponse:
         ticket_count=len(comp_tickets.valid_comp_tickets(db, guest)),
         seat_labels=[s.label for s in seats_service.guest_seats(db, guest.id)],
         link_sent_at=guest.link_sent_at,
+        tickets_sent_at=guest.tickets_sent_at,
         created_at=guest.created_at,
     )
 
@@ -328,16 +329,21 @@ def set_guest_sent_status(
     user: CurrentUser = Depends(require_event_access),
 ):
     """
-    Manually mark whether this guest's RSVP link has been sent — there's
-    no automated email yet, so this is the organizer's own record-keeping.
-    Setting sent=true stamps the current time; sent=false clears it back
-    to null (e.g. correcting an accidental click), not a "sent then
-    un-sent" history — there's only ever one timestamp.
+    Manually flip one of the organizer's record-keeping markers:
+    marker='link' (default) is the RSVP-link-sent stamp; marker='tickets'
+    is the external-ticketing tickets-sent stamp (the organizer ordered
+    real tickets on their outside platform and delivered them). Setting
+    sent=true stamps the current time; sent=false clears it back to null
+    (correcting an accidental click) — there's only ever one timestamp.
     """
     guest = db.query(Guest).filter(Guest.id == guest_id, Guest.event_id == event_id).first()
     if not guest:
         raise HTTPException(status_code=404, detail="Guest not found.")
-    guest.link_sent_at = datetime.now(timezone.utc) if payload.sent else None
+    stamp = datetime.now(timezone.utc) if payload.sent else None
+    if payload.marker == "tickets":
+        guest.tickets_sent_at = stamp
+    else:
+        guest.link_sent_at = stamp
     db.commit()
     db.refresh(guest)
     return _serialize_guest(db, guest)
@@ -570,3 +576,65 @@ def delete_guest(
     db.query(GuestTicketAllotment).filter(GuestTicketAllotment.guest_id == guest_id).delete()
     db.delete(guest)
     db.commit()
+
+@router.get("/roster/door")
+def guest_door_roster(
+    event_id: str,
+    db: Session = Depends(get_db),
+    user: CurrentUser = Depends(require_event_access),
+):
+    """
+    The door reference: every guest — direct invitees AND allotment
+    recipients — with their admission codes, days, statuses, and seat
+    labels in ONE payload, so door staff can look someone up by name
+    when their email never arrived and admit them by punching the code
+    into manual check-in. Read-only by design; fixing a guest happens
+    on the Invites / Allotments pages.
+    """
+    from app.models.seat import Seat
+    from app.models.ticket import Ticket
+
+    guests = (
+        db.query(Guest)
+        .filter(Guest.event_id == event_id)
+        .order_by(Guest.name)
+        .all()
+    )
+    ids = [g.id for g in guests]
+    codes_by_guest: dict = {}
+    if ids:
+        rows = (
+            db.query(Ticket, Seat)
+            .outerjoin(Seat, Seat.id == Ticket.seat_id)
+            .filter(Ticket.guest_id.in_(ids))
+            .order_by(Ticket.valid_date, Ticket.created_at)
+            .all()
+        )
+        for ticket, seat in rows:
+            codes_by_guest.setdefault(ticket.guest_id, []).append(
+                {
+                    "code": ticket.code,
+                    "valid_date": ticket.valid_date,
+                    "status": ticket.status.value if hasattr(ticket.status, "value") else str(ticket.status),
+                    "seat_label": seat.label if seat else None,
+                }
+            )
+    out = []
+    for g in guests:
+        out.append(
+            {
+                "id": str(g.id),
+                "name": g.name,
+                "email": g.email,
+                "guest_type_id": str(g.guest_type_id) if g.guest_type_id else None,
+                "allocation_status": g.allocation_status.value if hasattr(g.allocation_status, "value") else str(g.allocation_status),
+                "rsvp_confirmed": g.rsvp_confirmed,
+                "party_size": g.party_size,
+                "visit_date": g.visit_date,
+                "allocated_by_guest_id": str(g.allocated_by_guest_id) if g.allocated_by_guest_id else None,
+                "link_sent_at": g.link_sent_at.isoformat() if g.link_sent_at else None,
+                "tickets_sent_at": g.tickets_sent_at.isoformat() if g.tickets_sent_at else None,
+                "tickets": codes_by_guest.get(g.id, []),
+            }
+        )
+    return out

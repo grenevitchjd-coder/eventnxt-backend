@@ -116,6 +116,10 @@ class Guest(Base):
     # means "not sent." Doubles as a boolean via the null check while
     # also recording when, for follow-up purposes.
     link_sent_at = Column(DateTime(timezone=True), nullable=True)
+    # External-ticketing record-keeping: organizer manually marks that
+    # this guest's actual tickets were sent (ordered on the external
+    # platform and delivered). Null = not yet. See migration 0038.
+    tickets_sent_at = Column(DateTime(timezone=True), nullable=True)
 
     # Free-text extras an organizer might track per guest — comp items
     # beyond the ticket itself (drinks, a gift bag) and general notes.
