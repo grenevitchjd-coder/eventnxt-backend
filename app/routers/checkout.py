@@ -39,6 +39,7 @@ from app.schemas.ticketing import (
     PublicTicketResponse,
     PublicTicketTypeResponse,
     PublicSeatMapResponse,
+    PublicPassNight,
     PublicTicketSectionOption,
     PublicSeatResponse,
     PublicSeatSectionResponse,
@@ -106,7 +107,47 @@ def list_public_ticket_types(slug: str, db: Session = Depends(get_db)):
                     ),
                 )
             )
-    pass_ids = set(ticketing.pass_members_for(db, [t.id for t in ticket_types]).keys())
+    pass_map = ticketing.pass_members_for(db, [t.id for t in ticket_types])
+    pass_ids = set(pass_map.keys())
+    # Passes over ASSIGNED families keep the seat picker; passes over
+    # SECTIONED families instead get per-night section options (the
+    # buyer picks a section for each night — different views welcome).
+    seat_pass_ids: set = set()
+    pass_nights_by_id: dict = {}
+    for pid, members in pass_map.items():
+        mpool_ids = [m.seating_category_id for m in members if m.seating_category_id]
+        mpools = [pools_by_id.get(i) or db.query(SeatingCategory).get(i) for i in mpool_ids]
+        if mpools and len(mpools) == len(members) and all(p and p.sales_grain == "seat" for p in mpools):
+            seat_pass_ids.add(pid)
+            continue
+        sectioned = seats_service.section_required_pool_ids(db, mpool_ids)
+        if not sectioned:
+            continue  # GA family: plain quantity stepper, min-night availability
+        nights = []
+        for m in members:
+            opts = []
+            pool = next((p for p in mpools if p and p.id == m.seating_category_id), None)
+            for sec in (
+                db.query(ZoneSection)
+                .filter(ZoneSection.seating_category_id == m.seating_category_id)
+                .order_by(ZoneSection.sort_order)
+                .all()
+            ):
+                opts.append(
+                    PublicTicketSectionOption(
+                        id=sec.id,
+                        section_label=sec.section_label,
+                        row_label=sec.row_label,
+                        remaining=max(
+                            sec.capacity
+                            - seats_service.section_heads_taken(db, sec.id)
+                            - (seating.guest_hold_heads(db, pool, sec.section_label) if pool else 0),
+                            0,
+                        ),
+                    )
+                )
+            nights.append(PublicPassNight(date=m.valid_date, sections=opts))
+        pass_nights_by_id[pid] = nights
     return [
         PublicTicketTypeResponse(
             id=t.id,
@@ -117,9 +158,10 @@ def list_public_ticket_types(slug: str, db: Session = Depends(get_db)):
             max_per_order=t.max_per_order,
             admits=t.admits or 1,
             valid_date=t.valid_date,
-            assigned_seating=(t.seating_category_id in assigned_pool_ids) or (t.id in pass_ids),
+            assigned_seating=(t.seating_category_id in assigned_pool_ids) or (t.id in seat_pass_ids),
             section_required=t.seating_category_id in section_pool_ids,
             sections=sections_by_pool.get(t.seating_category_id, []),
+            pass_nights=pass_nights_by_id.get(t.id, []),
             available=avail[t.id]["available"],
             on_sale=ticketing.is_on_sale(t, avail[t.id]["available"]),
         )
@@ -242,7 +284,7 @@ def start_checkout(slug: str, payload: CheckoutRequest, db: Session = Depends(ge
             event_id=profile.event_id,
             buyer_name=payload.buyer_name,
             buyer_email=payload.buyer_email,
-            requested=[(item.ticket_type_id, item.quantity, item.seat_ids, item.zone_section_id) for item in payload.items],
+            requested=[(item.ticket_type_id, item.quantity, item.seat_ids, item.zone_section_id, item.zone_section_ids) for item in payload.items],
             promo_code=promo_code,
         )
     except ticketing.CheckoutError as exc:

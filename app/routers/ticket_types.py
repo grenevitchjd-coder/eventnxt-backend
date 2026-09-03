@@ -286,11 +286,11 @@ def fan_out_ticket_type(
 
 def _seated_pass_family(db: Session, event_id: str, template: TicketType) -> list[TicketType]:
     """
-    The dated, seated family a pass can ride on, resolved from a nightly
+    The dated family a pass can ride on, resolved from a nightly
     template by NORMALIZED name (trim / collapse whitespace / lowercase —
     a stray space can't split a family). Raises buyer-readable 400s when
-    the family isn't pass-shaped: fewer than two distinct days, any night
-    not assigned-seat, or an active pass already covering a member.
+    the family isn't pass-shaped: fewer than two distinct days, mixed or
+    table selling grains, or an active pass already covering a member.
     """
     family = (
         db.query(TicketType)
@@ -303,10 +303,17 @@ def _seated_pass_family(db: Session, event_id: str, template: TicketType) -> lis
     pools = (
         db.query(SeatingCategory).filter(SeatingCategory.id.in_([m.seating_category_id for m in family if m.seating_category_id])).all()
     )
-    if len(pools) != len(family) or any(p.sales_grain != "seat" for p in pools):
+    grains = {p.sales_grain for p in pools}
+    if len(pools) == len(family) and grains <= {"seat"}:
+        pass  # seat family: the pass claims one chair on every night
+    elif len(pools) == len(family) and grains <= {"row"}:
+        pass  # sectioned family: the pass claims one section head per night
+    elif grains <= {"ga"}:
+        pass  # GA family (pools optional): the pass consumes plain nightly counts
+    else:
         raise HTTPException(
             status_code=400,
-            detail="All-days passes currently cover assigned-seat families — for GA or row packages, create a whole-event type instead.",
+            detail="All-days passes need every night selling the same way — all assigned seats, all rows, or all GA. (Table families aren't pass-able yet.)",
         )
     already = (
         db.query(PassMember.id)
@@ -336,12 +343,12 @@ def create_pass_from_type(
 ):
     """
     Derived all-days pass: a whole-event type linked to every night of a
-    seated family (same-named dated types with assigned seats — the
-    fan-out shape). It owns no seats; buying it claims the same seat
-    identity in every night's pool at the pass's one price. Availability
-    is physical (the seats themselves) plus the pass's own quantity cap.
-    v1 is assigned-seat families only — GA/row all-days products are the
-    standalone package path.
+    nightly family (same-named dated types — the fan-out shape). It owns
+    no inventory of its own: a seat family claims the same chair every
+    night, a sectioned row family claims one section head per night (the
+    buyer picks a section for each night), and a GA family consumes one
+    head of each night's plain count. Availability is derived — the
+    thinnest night is the ceiling — plus the pass's own quantity cap.
     """
     row = get_event_settings_row(db, event_id)
     if not row or row.ticket_span != "mixed":

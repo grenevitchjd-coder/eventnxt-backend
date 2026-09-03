@@ -1,3 +1,4 @@
+"""eventnxt-backend: app/services/ticketing.py"""
 """
 eventnxt-backend: app/services/ticketing.py
 
@@ -27,6 +28,8 @@ from sqlalchemy.orm import Session
 from app.config import settings
 from app.models.order import Order, OrderStatus
 from app.models.order_item import OrderItem
+from app.models.pass_member import PassMember
+from app.models.seating_category import SeatingCategory
 from app.models.ticket import Ticket, TicketStatus
 from app.models.ticket_type import TicketType
 from app.services import seats as seats_service
@@ -104,15 +107,60 @@ def committed_quantities(db: Session, ticket_type_ids: list[uuid.UUID]) -> dict[
     return result
 
 
+def pass_consumption_for(db: Session, member_type_ids: list) -> dict:
+    """
+    member_type_id -> units consumed OUT OF that night's inventory by
+    all-days passes covering it (paid + live pending; passes are
+    admits-1). A pass sale genuinely uses one chair/head of every night,
+    so honest nightly numbers must subtract it — derived, never
+    bookkept, exactly like everything else.
+    """
+    if not member_type_ids:
+        return {}
+    now = datetime.now(timezone.utc)
+    rows = (
+        db.query(PassMember.member_type_id, safunc.sum(OrderItem.quantity))
+        .join(OrderItem, OrderItem.ticket_type_id == PassMember.pass_type_id)
+        .join(Order, Order.id == OrderItem.order_id)
+        .filter(
+            PassMember.member_type_id.in_(member_type_ids),
+            (
+                (Order.status == OrderStatus.PAID)
+                | ((Order.status == OrderStatus.PENDING) & (Order.expires_at > now))
+            ),
+        )
+        .group_by(PassMember.member_type_id)
+        .all()
+    )
+    return {mid: int(q or 0) for mid, q in rows}
+
+
 def availability_for(db: Session, ticket_types: list[TicketType]) -> dict[uuid.UUID, dict]:
-    counts = committed_quantities(db, [t.id for t in ticket_types])
+    ids = [t.id for t in ticket_types]
+    counts = committed_quantities(db, ids)
+    # Nightly types: subtract what passes have consumed of their nights.
+    pass_taken = pass_consumption_for(db, ids)
+    # Pass types: can never sell past their thinnest night — available is
+    # capped at the minimum member remaining (own cap still applies).
+    pass_map = pass_members_for(db, ids)
+    member_avail: dict = {}
+    if pass_map:
+        members_by_id = {m.id: m for ms in pass_map.values() for m in ms}
+        mcounts = committed_quantities(db, list(members_by_id))
+        mtaken = pass_consumption_for(db, list(members_by_id))
+        for mid, m in members_by_id.items():
+            c = mcounts[mid]
+            member_avail[mid] = max(0, m.quantity - c["sold"] - c["held"] - mtaken.get(mid, 0))
     out = {}
     for t in ticket_types:
         c = counts[t.id]
+        available = max(0, t.quantity - c["sold"] - c["held"] - pass_taken.get(t.id, 0))
+        if t.id in pass_map:
+            available = min(available, min(member_avail[m.id] for m in pass_map[t.id]))
         out[t.id] = {
             "sold": c["sold"],
             "held": c["held"],
-            "available": max(0, t.quantity - c["sold"] - c["held"]),
+            "available": available,
         }
     return out
 
@@ -152,35 +200,69 @@ def create_pending_order(
     event_id: uuid.UUID,
     buyer_name: str,
     buyer_email: str,
-    requested: list[tuple[uuid.UUID, int, list[uuid.UUID] | None, uuid.UUID | None]],  # (ticket_type_id, quantity, seat_ids, zone_section_id)
+    requested: list[tuple[uuid.UUID, int, list[uuid.UUID] | None, uuid.UUID | None, list[uuid.UUID] | None]],  # (ticket_type_id, quantity, seat_ids, zone_section_id, pass zone_section_ids — one per night)
     promo_code=None,  # a resolved PromoCode (or None) — discount + attribution applied here, atomically
 ) -> Order:
     """
     The critical section. Locks the ticket_type rows (ordered by id —
     deadlock-safe), re-checks availability UNDER the lock, then creates
-    the order + items + hold. Raises CheckoutError with a buyer-readable
-    message on any problem. Caller commits.
+    the order + items + hold. A pass in the basket also locks its member
+    nights' rows (same one ordered query), so pass buyers and nightly
+    buyers serialize against each other — a GA pass can't race a nightly
+    GA sale past the thinnest night. Raises CheckoutError with a
+    buyer-readable message on any problem. Caller commits.
     """
-    ids = sorted({tid for tid, _, _, _ in requested})
+    ids = sorted({tid for tid, _, _, _, _ in requested})
     qty_by_id: dict[uuid.UUID, int] = {}
     seats_by_id: dict[uuid.UUID, list[uuid.UUID]] = {}
     section_by_id: dict[uuid.UUID, uuid.UUID | None] = {}
-    for tid, qty, seat_ids, zone_section_id in requested:
+    pass_sections_by_id: dict[uuid.UUID, list[uuid.UUID]] = {}
+    for tid, qty, seat_ids, zone_section_id, pass_section_ids in requested:
         qty_by_id[tid] = qty_by_id.get(tid, 0) + qty
         if seat_ids:
             seats_by_id.setdefault(tid, []).extend(seat_ids)
         if zone_section_id:
             section_by_id[tid] = zone_section_id
+        if pass_section_ids:
+            pass_sections_by_id[tid] = list(pass_section_ids)
 
-    ticket_types = (
+    # Pass members join the lock set BEFORE locking — one id-ordered
+    # FOR UPDATE query covers basket types and every night they touch.
+    pass_map = pass_members_for(db, ids)
+    member_ids = {m.id for ms in pass_map.values() for m in ms}
+    lock_ids = sorted(set(ids) | member_ids)
+
+    locked = (
         db.query(TicketType)
-        .filter(TicketType.id.in_(ids), TicketType.event_id == event_id)
+        .filter(TicketType.id.in_(lock_ids), TicketType.event_id == event_id)
         .order_by(TicketType.id)
         .with_for_update()
         .all()
     )
+    ticket_types = [t for t in locked if t.id in set(ids)]
     if len(ticket_types) != len(ids):
         raise CheckoutError("One of the selected ticket types no longer exists for this event.")
+
+    # Which passes cover which kind of nightly inventory: 'seat' families
+    # hold chairs (seat picker), sectioned 'row' families claim one
+    # section head per night, GA families consume plain nightly counts
+    # (gated by the min-over-nights availability under these locks).
+    pass_pools: dict[uuid.UUID, list] = {}
+    if pass_map:
+        all_pool_ids = [m.seating_category_id for ms in pass_map.values() for m in ms if m.seating_category_id]
+        pools_by_id = {c.id: c for c in db.query(SeatingCategory).filter(SeatingCategory.id.in_(all_pool_ids)).all()} if all_pool_ids else {}
+        for pid, members in pass_map.items():
+            pass_pools[pid] = [pools_by_id[m.seating_category_id] for m in members if m.seating_category_id in pools_by_id]
+    seated_pass_ids = {
+        pid for pid, pools in pass_pools.items()
+        if pools and len(pools) == len(pass_map[pid]) and all(p.sales_grain == "seat" for p in pools)
+    }
+    sectioned_pass_ids = {
+        pid for pid, pools in pass_pools.items()
+        if pid not in seated_pass_ids
+        and pools
+        and seats_service.section_required_pool_ids(db, [p.id for p in pools])
+    }
 
     avail = availability_for(db, ticket_types)
 
@@ -256,19 +338,35 @@ def create_pending_order(
             except ValueError as exc:
                 raise CheckoutError(str(exc))
 
+    # Sectioned passes: one section claim per night, chosen night by
+    # night (a buyer can sit somewhere new each show). Same lock-then-
+    # check discipline as single-night sections, inside this transaction.
+    for t in ticket_types:
+        if t.id not in sectioned_pass_ids:
+            continue
+        picks = pass_sections_by_id.get(t.id)
+        if not picks:
+            raise CheckoutError(f'"{t.name}" is sold by section — pick a section for each night.')
+        try:
+            seats_service.lock_and_claim_pass_sections(
+                db, pass_type=t, members=pass_map[t.id], quantity=qty_by_id[t.id],
+                zone_section_ids=picks, order_item=order_items[t.id],
+            )
+        except ValueError as exc:
+            raise CheckoutError(str(exc))
+
     # Seat-level holds — the assigned-seat mirror of the quantity hold
     # above, inside the same locked transaction. Conflicts surface as
-    # buyer-readable CheckoutErrors. Pass types hold the same seat
-    # identity across every member night instead of one pool.
-    pass_map = pass_members_for(db, [t.id for t in ticket_types])
+    # buyer-readable CheckoutErrors. Seat-family pass types hold the same
+    # seat identity across every member night instead of one pool.
     for t in ticket_types:
         picked = seats_by_id.get(t.id)
         if not picked:
-            if t.id in pass_map:
+            if t.id in seated_pass_ids:
                 raise CheckoutError(f'"{t.name}" is seat-picked — choose your seat for all nights.')
             continue
         try:
-            if t.id in pass_map:
+            if t.id in seated_pass_ids:
                 seats_service.lock_and_hold_pass_seats(
                     db, pass_type=t, members=pass_map[t.id], quantity=qty_by_id[t.id],
                     seat_ids=picked, order_item_id=order_items[t.id].id,
@@ -316,23 +414,44 @@ def fulfill_paid_order(db: Session, order: Order) -> list[Ticket]:
     for item in items:
         tt = tts_by_id.get(item.ticket_type_id)
         if item.ticket_type_id in pass_map:
-            # Derived pass: one code per held seat, dated to the night
-            # whose pool that seat lives in — the buyer keeps the same
-            # chair every night, three dated QRs in one email.
-            date_by_pool = {m.seating_category_id: m.valid_date for m in pass_map[item.ticket_type_id]}
-            for seat in seats_service.seats_for_order_item(db, item.id):
-                ticket = Ticket(
-                    order_id=order.id,
-                    order_item_id=item.id,
-                    ticket_type_id=item.ticket_type_id,
-                    event_id=order.event_id,
-                    code=generate_ticket_code(),
-                    status=TicketStatus.VALID,
-                    seat_id=seat.id,
-                    valid_date=date_by_pool.get(seat.seating_category_id),
-                )
-                db.add(ticket)
-                tickets.append(ticket)
+            members = pass_map[item.ticket_type_id]
+            date_by_pool = {m.seating_category_id: m.valid_date for m in members}
+            held_seats = seats_service.seats_for_order_item(db, item.id)
+            if held_seats:
+                # Seat-family pass: one code per held seat, dated to the
+                # night whose pool that seat lives in — the buyer keeps
+                # the same chair every night, three dated QRs in one email.
+                for seat in held_seats:
+                    ticket = Ticket(
+                        order_id=order.id,
+                        order_item_id=item.id,
+                        ticket_type_id=item.ticket_type_id,
+                        event_id=order.event_id,
+                        code=generate_ticket_code(),
+                        status=TicketStatus.VALID,
+                        seat_id=seat.id,
+                        valid_date=date_by_pool.get(seat.seating_category_id),
+                    )
+                    db.add(ticket)
+                    tickets.append(ticket)
+            else:
+                # Row/GA pass: no chairs to carry — each purchased pass
+                # mints one dated code per member night (the section
+                # picks live on the order item's claim rows + label).
+                for _ in range(item.quantity):
+                    for m in members:
+                        ticket = Ticket(
+                            order_id=order.id,
+                            order_item_id=item.id,
+                            ticket_type_id=item.ticket_type_id,
+                            event_id=order.event_id,
+                            code=generate_ticket_code(),
+                            status=TicketStatus.VALID,
+                            seat_id=None,
+                            valid_date=m.valid_date,
+                        )
+                        db.add(ticket)
+                        tickets.append(ticket)
             continue
         if tt is not None and tt.valid_date:
             dates = [tt.valid_date]

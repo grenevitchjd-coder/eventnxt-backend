@@ -549,12 +549,15 @@ def section_required_pool_ids(db: Session, pool_ids: list) -> set:
 
 def section_heads_taken(db: Session, zone_section_id) -> int:
     """Heads committed to a section by box office: paid or unexpired
-    pending order items × the ticket type's admits. Comps float at pool
+    pending order items × the ticket type's admits — PLUS row/GA pass
+    claims on this section for their night (order_item_pass_sections;
+    passes are admits-1, so heads = item quantity). Comps float at pool
     level (they have no section) and are governed by pool capacity."""
+    from app.models.order_item import OrderItemPassSection
     from app.models.ticket_type import TicketType
 
     now = datetime.now(timezone.utc)
-    return int(
+    direct = int(
         db.query(func.coalesce(func.sum(OrderItem.quantity * TicketType.admits), 0))
         .join(Order, Order.id == OrderItem.order_id)
         .join(TicketType, TicketType.id == OrderItem.ticket_type_id)
@@ -568,6 +571,21 @@ def section_heads_taken(db: Session, zone_section_id) -> int:
         .scalar()
         or 0
     )
+    pass_claims = int(
+        db.query(func.coalesce(func.sum(OrderItem.quantity), 0))
+        .join(OrderItemPassSection, OrderItemPassSection.order_item_id == OrderItem.id)
+        .join(Order, Order.id == OrderItem.order_id)
+        .filter(
+            OrderItemPassSection.zone_section_id == zone_section_id,
+            or_(
+                Order.status == OrderStatus.PAID,
+                (Order.status == OrderStatus.PENDING) & (Order.expires_at > now),
+            ),
+        )
+        .scalar()
+        or 0
+    )
+    return direct + pass_claims
 
 
 def lock_and_claim_section(db: Session, *, ticket_type, quantity: int, zone_section_id, order_item) -> None:
@@ -602,3 +620,58 @@ def lock_and_claim_section(db: Session, *, ticket_type, quantity: int, zone_sect
     order_item.section_label = (
         f"Section {section.section_label}" + (f" · {section.row_label}" if section.row_label else "")
     )
+
+def lock_and_claim_pass_sections(
+    db: Session, *, pass_type, members, quantity: int, zone_section_ids: list, order_item
+) -> None:
+    """
+    The row/GA-pass mirror of lock_and_hold_pass_seats: the buyer chose
+    one section PER NIGHT (they may differ — different views of the
+    show), and every unit on the item follows those picks. Lock the
+    chosen section rows FOR UPDATE in id order (after ticket-type
+    locks — same global discipline), re-check each night's heads under
+    the lock (box office + other pass claims + comp holds), then write
+    one claim row per night. Raises ValueError with a buyer-readable
+    message; heads free automatically on expiry/refund by not counting.
+    """
+    from app.models.order_item import OrderItemPassSection
+    from app.models.seating_category import SeatingCategory as _SC
+    from app.services import seating as seating_service
+
+    member_pool_ids = {m.seating_category_id for m in members if m.seating_category_id}
+    picked = [x for x in (zone_section_ids or []) if x]
+    if len(picked) != len(members):
+        raise ValueError(f'"{pass_type.name}" needs a section pick for each of its {len(members)} nights.')
+    sections = (
+        db.query(ZoneSection)
+        .filter(ZoneSection.id.in_(picked))
+        .order_by(ZoneSection.id)
+        .with_for_update()
+        .all()
+    )
+    if len(sections) != len(set(picked)) or len(set(picked)) != len(picked):
+        raise ValueError("One of the chosen sections no longer exists — refresh and choose again.")
+    pools_hit = [s.seating_category_id for s in sections]
+    if set(pools_hit) - member_pool_ids or len(set(pools_hit)) != len(members):
+        raise ValueError(f'"{pass_type.name}" needs exactly one section per night — refresh and choose again.')
+
+    pools = {c.id: c for c in db.query(_SC).filter(_SC.id.in_(pools_hit)).all()}
+    day_by_pool = {m.seating_category_id: m.valid_date for m in members}
+    labels = []
+    for section in sorted(sections, key=lambda s: day_by_pool.get(s.seating_category_id) or ""):
+        heads_taken = section_heads_taken(db, section.id)
+        cat = pools.get(section.seating_category_id)
+        held_by_guests = seating_service.guest_hold_heads(db, cat, section.section_label) if cat else 0
+        if heads_taken + held_by_guests + quantity > section.capacity:
+            left = max(section.capacity - heads_taken - held_by_guests, 0)
+            day = day_by_pool.get(section.seating_category_id) or ""
+            raise ValueError(
+                f"Section {section.section_label} on {day} only has {left} left — someone may have "
+                "beaten you to it. Pick another section for that night or adjust the quantity."
+            )
+        db.add(OrderItemPassSection(order_item_id=order_item.id, zone_section_id=section.id))
+        day = day_by_pool.get(section.seating_category_id)
+        labels.append((f"{day} — " if day else "") + f"Section {section.section_label}")
+    # One snapshot the order page and emails can show as-is.
+    order_item.section_label = " · ".join(labels)
+    db.flush()

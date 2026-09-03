@@ -75,6 +75,10 @@ class PublicTicketTypeResponse(BaseModel):
     # The choosable sections for section_required types, with live
     # remaining heads so the picker can show "Section C · 12 left".
     sections: list["PublicTicketSectionOption"] = []
+    # Sectioned all-days passes: one entry per night, each with that
+    # night's choosable sections — the picker renders one dropdown per
+    # night (the buyer may sit somewhere new every show).
+    pass_nights: list["PublicPassNight"] = []
 
 
 class PublicTicketSectionOption(BaseModel):
@@ -82,6 +86,11 @@ class PublicTicketSectionOption(BaseModel):
     section_label: str
     row_label: Optional[str] = None
     remaining: int = 0  # active AND inside the sales window AND available > 0
+
+
+class PublicPassNight(BaseModel):
+    date: Optional[str] = None  # the member night's ISO day
+    sections: list[PublicTicketSectionOption] = []
 
 
 # ---------- Checkout ----------
@@ -96,6 +105,10 @@ class CheckoutItemRequest(BaseModel):
     # Sectioned unassigned types (rows/tables with a breakdown): the
     # buyer's chosen section — REQUIRED for those types.
     zone_section_id: Optional[uuid.UUID] = None
+    # Sectioned all-days passes: the buyer's chosen section for EACH
+    # night (they may differ — a new view every show). One id per night,
+    # any order; each must belong to a different member night's pool.
+    zone_section_ids: Optional[list[uuid.UUID]] = None
 
 
 class CheckoutRequest(BaseModel):
