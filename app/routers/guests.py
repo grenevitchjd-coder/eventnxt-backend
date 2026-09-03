@@ -570,9 +570,33 @@ def delete_guest(
     db: Session = Depends(get_db),
     user: CurrentUser = Depends(require_event_access),
 ):
+    """
+    Fully remove a guest — including any comp codes already minted for
+    them (the codes die with them; the door would show not-found), any
+    pending ticket requests, and their seat assignments. Assigned seats
+    stay RESERVED (blocked, label intact) so the physical hold survives
+    the person — release them from the type's Seats view if the chairs
+    should go back on sale. A distributor with recipients still on the
+    books can't be deleted; remove or reassign the recipients first.
+    """
+    from app.models.guest_ticket_request import GuestTicketRequest
+    from app.models.seat import Seat
+    from app.models.ticket import Ticket
+
     guest = db.query(Guest).filter(Guest.id == guest_id, Guest.event_id == event_id).first()
     if not guest:
         raise HTTPException(status_code=404, detail="Guest not found.")
+    kids = db.query(Guest.id).filter(Guest.allocated_by_guest_id == guest_id).count()
+    if kids:
+        raise HTTPException(
+            status_code=400,
+            detail=f"This allotment still has {kids} recipient(s) — remove them first so their tickets are handled deliberately.",
+        )
+    # Order matters with autoflush off: children before the guest row,
+    # each bulk delete hitting the DB immediately.
+    db.query(GuestTicketRequest).filter(GuestTicketRequest.guest_id == guest_id).delete()
+    db.query(Ticket).filter(Ticket.guest_id == guest_id).delete()
+    db.query(Seat).filter(Seat.guest_id == guest_id).update({Seat.guest_id: None})
     db.query(GuestTicketAllotment).filter(GuestTicketAllotment.guest_id == guest_id).delete()
     db.delete(guest)
     db.commit()
