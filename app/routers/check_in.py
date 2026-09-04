@@ -45,6 +45,11 @@ class CheckInResult(BaseModel):
     seat_label: Optional[str] = None
     checked_in_at: Optional[datetime] = None
     party_note: Optional[str] = None  # comps: "code 2 of 4 for this guest"
+    # Why a dead code is dead, in the door's language: 'cancelled' for
+    # comps and free orders (no money ever moved), 'refunded' only when
+    # a payment actually went back. The machine result stays 'refunded'
+    # either way so existing clients keep working.
+    refund_word: Optional[str] = None  # 'cancelled' | 'refunded'
 
 
 class CheckInStats(BaseModel):
@@ -76,6 +81,7 @@ def _describe(db: Session, ticket: Ticket) -> dict:
             comp_seat_label = f"Section {guest.section_label}"
         out.update(
             kind="comp",
+            refund_word="cancelled",  # comps never carried money
             name=guest.name if guest else None,
             ticket_type_name=(gt.name if gt else None),
             seat_label=comp_seat_label,
@@ -90,6 +96,11 @@ def _describe(db: Session, ticket: Ticket) -> dict:
             seat_label = seat.label if seat else None
         out.update(
             kind="order",
+            refund_word=(
+                "refunded"
+                if order and max((order.subtotal_cents or 0) - (order.discount_cents or 0), 0) > 0
+                else "cancelled"  # free order: no money ever moved
+            ),
             name=order.buyer_name if order else None,
             ticket_type_name=(item.ticket_type_name if item else None),
             seat_label=seat_label or (item.section_label if item else None),
