@@ -173,6 +173,34 @@ def main():
     r2 = client.post(f"/events/{EV}/guests/send-invites", json={"rsvp_base_url": "https://eventnxt.events360.app"}, headers=H)
     check("bulk is idempotent — nothing left unsent", r2.json()["sent"] == 0, r2.text)
 
+    # ---- 6. total budget across days (sponsor caps at the total) ----
+    cap = add_guest("CapCo", spon_t, allocation_status="confirmed", guest_mode="distribute",
+                    spend_total=3,
+                    ticket_allotment=[{"date": D1, "quantity": 2}, {"date": D2, "quantity": 2}])
+    r = client.post(f"/public/rsvp/{cap['rsvp_token']}/distribute",
+                    json={"recipients": [
+                        {"name": "R1", "email": "r1@x.com", "party_size": 2, "visit_date": D1},
+                        {"name": "R2", "email": "r2@x.com", "party_size": 2, "visit_date": D2},
+                    ]})
+    check("total budget cap: 2+2 refused when total is 3", r.status_code == 400 and "total of 3" in r.text, r.text)
+    r = client.post(f"/public/rsvp/{cap['rsvp_token']}/distribute",
+                    json={"recipients": [
+                        {"name": "R1", "email": "r1@x.com", "party_size": 2, "visit_date": D1},
+                        {"name": "R2", "email": "r2@x.com", "party_size": 1, "visit_date": D2},
+                    ]})
+    check("2 Thu + 1 Fri fits the total of 3", r.status_code == 200, r.text)
+
+    # ---- 7. portal links: holder email wording + holders-only bulk ----
+    outbox.clear()
+    r = client.post(f"/events/{EV}/guests/{spon['id']}/send-invite",
+                    json={"rsvp_base_url": "https://eventnxt.events360.app"}, headers=H)
+    check("holder gets PORTAL wording", r.status_code == 200 and outbox
+          and "allotment" in outbox[0]["subject"] and "hand out" in outbox[0]["text_body"], outbox)
+    outbox.clear()
+    r = client.post(f"/events/{EV}/guests/send-portal-links",
+                    json={"rsvp_base_url": "https://eventnxt.events360.app"}, headers=H)
+    check("bulk portal links hit unsent holders only", r.status_code == 200 and r.json()["sent"] == 1, r.text)
+
     print()
     if failures:
         print(f"fashionxt guests: {len(failures)} FAILED — " + ", ".join(failures))

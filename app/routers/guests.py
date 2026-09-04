@@ -795,3 +795,35 @@ def send_guest_invites_bulk(
             failed += 1
     db.commit()
     return {"sent": sent, "failed": failed}
+
+
+@router.post("/send-portal-links")
+def send_portal_links_bulk(
+    event_id: str,
+    payload: SendInvitesBulkRequest,
+    db: Session = Depends(get_db),
+    user: CurrentUser = Depends(require_event_access),
+):
+    """
+    The Allotments page's commit: email every allotment HOLDER without a
+    sent stamp their portal link (budget summary + how it works), or the
+    explicit ids given. Mirrors /send-invites, holders-only — the two
+    pages never email each other's people.
+    """
+    q = db.query(Guest).filter(Guest.event_id == event_id, Guest.allocated_by_guest_id.is_(None))
+    if payload.guest_ids:
+        q = q.filter(Guest.id.in_(payload.guest_ids))
+    else:
+        q = q.filter(Guest.link_sent_at.is_(None))
+    sent = failed = 0
+    base = payload.rsvp_base_url.rstrip("/")
+    for guest in q.all():
+        if not _is_allotment_holder(db, guest):
+            continue
+        if comp_tickets.send_invite_email(db, guest, f"{base}/rsvp/{guest.rsvp_token}"):
+            guest.link_sent_at = datetime.now(timezone.utc)
+            sent += 1
+        else:
+            failed += 1
+    db.commit()
+    return {"sent": sent, "failed": failed}

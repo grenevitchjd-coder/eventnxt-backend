@@ -476,6 +476,17 @@ def replace_guest_ticket_allotment(db: Session, guest_id: str, items) -> None:
     db.flush()
 
 
+def allotment_distributed_total(db: Session, parent_guest_id: str) -> int:
+    """Heads already handed out by this distributor across every day —
+    the counterpart of the per-day ledger, for the TOTAL budget cap."""
+    return int(
+        db.query(func.coalesce(func.sum(Guest.party_size), 0))
+        .filter(Guest.allocated_by_guest_id == parent_guest_id)
+        .scalar()
+        or 0
+    )
+
+
 def check_allotment_capacity_per_day(
     db: Session, parent_guest_id: str, requested_by_day: dict, allotment: dict
 ):

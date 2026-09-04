@@ -477,6 +477,32 @@ def send_invite_email(db: Session, guest: Guest, rsvp_link: str) -> bool:
 
     allot = seating.effective_allotment(db, guest)
     mode = effective_guest_mode(db, guest, allot)
+    if mode == "distribute":
+        # Allotment holders get PORTAL wording: this is their budget to
+        # hand out, and the link opens the distribution portal.
+        budget = ", ".join(f"{q} for {d}" for d, q in sorted(allot.items())) if allot else "your tickets"
+        total_line = (
+            f" (up to {guest.spend_total} in total)" if guest.spend_total is not None and allot and guest.spend_total < sum(allot.values()) else ""
+        )
+        subject = f"Your ticket allotment — {event_name}"
+        lines = [
+            f"Hi {guest.name},",
+            "",
+            f"You have tickets for {event_name} to hand out to your people: {budget}{total_line}.",
+            "Enter each person's name and email below and they'll receive their own confirmation link.",
+            "",
+            f"Manage your allotment here: {rsvp_link}",
+        ]
+        text = "\n".join(lines)
+        html = "<p>" + "</p><p>".join(l for l in lines if l) + "</p>"
+        html = html.replace(rsvp_link, f'<a href="{rsvp_link}">{rsvp_link}</a>')
+        from app.services.email import send_email
+
+        try:
+            send_email(to=guest.email, subject=subject, text_body=text, html_body=html)
+            return True
+        except Exception:
+            return False
     total = effective_spend_total(db, guest, allot, mode) if allot else 0
     cap_sum = sum(allot.values()) if allot else 0
     if allot and total and total < cap_sum:

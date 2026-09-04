@@ -388,6 +388,18 @@ def distribute_tickets(token: str, payload: RSVPDistributeRequest, db: Session =
     for r in payload.recipients:
         requested_by_day[r.visit_date] = requested_by_day.get(r.visit_date, 0) + r.party_size
     seating.check_allotment_capacity_per_day(db, str(guest.id), requested_by_day, allotment)
+    # Total budget (0039): day amounts are ceilings; when a TOTAL is set
+    # lower than their sum, the whole allotment also caps at the total —
+    # "25 across 10 Thu / 10 Fri / 10 Sat" hands out 25, never 30.
+    if guest.spend_total is not None:
+        already = seating.allotment_distributed_total(db, str(guest.id))
+        wanted = sum(requested_by_day.values())
+        if already + wanted > guest.spend_total:
+            left = max(guest.spend_total - already, 0)
+            raise HTTPException(
+                status_code=400,
+                detail=f"That's more than your total of {guest.spend_total} tickets — you have {left} left across all days.",
+            )
 
     children = []
     for r in payload.recipients:
