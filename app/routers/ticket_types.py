@@ -143,6 +143,38 @@ def update_ticket_type(
     ticket_type.sales_end = payload.sales_end
     ticket_type.is_active = payload.is_active
     ticket_type.sort_order = payload.sort_order
+    # Capacity-drift fix: a bare GA pool born alongside this type (the
+    # composer sets pool capacity = type quantity) should FOLLOW the
+    # type when its quantity is edited — otherwise raising 10 → 14 shows
+    # 14 for sale while checkout still refuses past the pool's stale 10.
+    # Only when it's unambiguous: 'ga' grain (seats are physical chairs
+    # and table capacity is derived — those never auto-resize), no
+    # sections (sectioned zones are managed per-section), and no OTHER
+    # type selling the same pool (a shared pool's capacity is a
+    # deliberate shared budget, not one type's mirror).
+    if ticket_type.seating_category_id and payload.quantity is not None:
+        from app.models.zone_section import ZoneSection
+
+        pool = (
+            db.query(SeatingCategory)
+            .filter(SeatingCategory.id == ticket_type.seating_category_id, SeatingCategory.event_id == event_id)
+            .first()
+        )
+        if pool and pool.sales_grain == "ga":
+            has_sections = (
+                db.query(ZoneSection.id).filter(ZoneSection.seating_category_id == pool.id).first() is not None
+            )
+            sibling = (
+                db.query(TicketType.id)
+                .filter(
+                    TicketType.seating_category_id == pool.id,
+                    TicketType.id != ticket_type.id,
+                )
+                .first()
+                is not None
+            )
+            if not has_sections and not sibling and pool.capacity != payload.quantity:
+                pool.capacity = payload.quantity
     db.commit()
     db.refresh(ticket_type)
     return _with_counts(db, [ticket_type])[0]
