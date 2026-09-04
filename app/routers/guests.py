@@ -705,6 +705,7 @@ def guest_door_roster(
                     "code": ticket.code,
                     "valid_date": ticket.valid_date,
                     "status": ticket.status.value if hasattr(ticket.status, "value") else str(ticket.status),
+                    "checked_in_at": ticket.checked_in_at.isoformat() if ticket.checked_in_at else None,
                     "seat_label": seat.label if seat else None,
                 }
             )
