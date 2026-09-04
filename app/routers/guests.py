@@ -93,6 +93,14 @@ def _serialize_guest(db: Session, guest: Guest) -> GuestResponse:
 
 
 
+
+def _is_allotment_holder(db: Session, guest: Guest) -> bool:
+    """A budget-holding entity (distributor) rather than a
+    ticket-receiving person — managed on the Allotments page."""
+    allot = seating.effective_allotment(db, guest)
+    return comp_tickets.effective_guest_mode(db, guest, allot) == "distribute"
+
+
 @router.post("", response_model=GuestResponse, status_code=201)
 def create_guest(
     event_id: str,
@@ -592,6 +600,18 @@ def delete_guest(
             status_code=400,
             detail=f"This allotment still has {kids} recipient(s) — remove them first so their tickets are handled deliberately.",
         )
+    # Confirmed ticket-receiving guests (invitees and allotment
+    # recipients) don't disappear via a casual delete: they're removed
+    # from the Guest list page, which cancels their codes AND emails
+    # them so nobody learns about it at the door. Allotment holders
+    # themselves (budget entities, no admission of their own) are
+    # exempt — this page is where they're managed.
+    is_holder = not guest.allocated_by_guest_id and _is_allotment_holder(db, guest)
+    if guest.allocation_status == GuestAllocationStatus.CONFIRMED and not is_holder:
+        raise HTTPException(
+            status_code=400,
+            detail=f"{guest.name} is confirmed — remove them from the Guest list page, which cancels their tickets and emails them (with an optional note).",
+        )
     # Order matters with autoflush off: children before the guest row,
     # each bulk delete hitting the DB immediately.
     db.query(GuestTicketRequest).filter(GuestTicketRequest.guest_id == guest_id).delete()
@@ -600,6 +620,47 @@ def delete_guest(
     db.query(GuestTicketAllotment).filter(GuestTicketAllotment.guest_id == guest_id).delete()
     db.delete(guest)
     db.commit()
+
+
+class GuestRemoveRequest(BaseModel):
+    note: Optional[str] = None  # highlighted in the cancellation email
+
+
+@router.post("/{guest_id}/remove", status_code=204)
+def remove_guest_with_notice(
+    event_id: str,
+    guest_id: str,
+    payload: GuestRemoveRequest,
+    db: Session = Depends(get_db),
+    user: CurrentUser = Depends(require_event_access),
+):
+    """
+    The Guest list page's removal: same cleanup as delete_guest, but for
+    ticket-receiving guests of ANY status — and when the guest was
+    confirmed with codes in hand, they're emailed a cancellation notice
+    (optional organizer note included) so the removal is never silent.
+    Allotment holders aren't removable here; manage them on Allotments.
+    """
+    from app.models.guest_ticket_request import GuestTicketRequest
+    from app.models.seat import Seat
+    from app.models.ticket import Ticket
+
+    guest = db.query(Guest).filter(Guest.id == guest_id, Guest.event_id == event_id).first()
+    if not guest:
+        raise HTTPException(status_code=404, detail="Guest not found.")
+    if not guest.allocated_by_guest_id and _is_allotment_holder(db, guest):
+        raise HTTPException(status_code=400, detail="Allotments are managed on the Allotments page.")
+    ticket_count = db.query(Ticket.id).filter(Ticket.guest_id == guest_id).count()
+    was_confirmed = guest.allocation_status == GuestAllocationStatus.CONFIRMED
+    if was_confirmed and ticket_count:
+        comp_tickets.send_cancellation_email(db, guest, ticket_count, note=payload.note)
+    db.query(GuestTicketRequest).filter(GuestTicketRequest.guest_id == guest_id).delete()
+    db.query(Ticket).filter(Ticket.guest_id == guest_id).delete()
+    db.query(Seat).filter(Seat.guest_id == guest_id).update({Seat.guest_id: None})
+    db.query(GuestTicketAllotment).filter(GuestTicketAllotment.guest_id == guest_id).delete()
+    db.delete(guest)
+    db.commit()
+
 
 @router.get("/roster/door")
 def guest_door_roster(

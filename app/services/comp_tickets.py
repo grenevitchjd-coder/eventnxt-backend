@@ -405,3 +405,36 @@ def send_comp_ticket_email(db: Session, guest: Guest, tickets: list[Ticket], not
 def mark_resolved(request, status: str) -> None:
     request.status = status
     request.resolved_at = datetime.now(timezone.utc)
+
+def send_cancellation_email(db: Session, guest: Guest, ticket_count: int, note: str | None = None) -> bool:
+    """
+    Tell a removed CONFIRMED guest their tickets no longer admit —
+    their codes are gone the moment the organizer removes them, and a
+    silent removal means an awkward scene at the door. Optional
+    organizer note rides along, same as the sync/upgrade email.
+    Best-effort like every send: failure never blocks the removal.
+    """
+    if not guest.email:
+        return False
+    profile = db.query(EventProfile).filter(EventProfile.event_id == guest.event_id).first()
+    event_name = profile.title if profile else "your event"
+    plural = "s" if ticket_count != 1 else ""
+    subject = f"Your ticket{plural} for {event_name} — cancelled"
+    lines = [f"Hi {guest.name},", ""]
+    if note:
+        lines += [note, ""]
+    lines += [
+        f"Your {ticket_count} ticket{plural} for {event_name} ha{'ve' if ticket_count != 1 else 's'} been cancelled "
+        "and the codes will no longer admit at the door.",
+        "",
+        "If you believe this is a mistake, please reply to this email or contact the organizer.",
+    ]
+    text = "\n".join(lines)
+    html = "<p>" + "</p><p>".join(l for l in lines if l) + "</p>"
+    from app.services.email import send_email
+
+    try:
+        send_email(to=guest.email, subject=subject, text_body=text, html_body=html)
+        return True
+    except Exception:
+        return False
