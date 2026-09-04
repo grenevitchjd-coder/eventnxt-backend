@@ -12,11 +12,21 @@ GUEST_MODE_FIELD = Field(default=None, pattern="^(invite|distribute|select)$")
 class GuestTypeCreateRequest(BaseModel):
     name: str
     guest_mode: str | None = GUEST_MODE_FIELD
+    # Shape defaults (0039): dates never live on the type — one type
+    # covers a Thu-only offer and a Fri-only offer.
+    day_scope: str | None = None  # 'single' / 'specific' / 'choose' / 'all'
+    default_ticket_count: int | None = None
+    default_hold_timing: str | None = None  # 'now' / 'on_confirm' / 'later'
 
 
 class GuestTypeUpdateRequest(BaseModel):
     name: str
     guest_mode: str | None = GUEST_MODE_FIELD
+    # Shape defaults (0039): dates never live on the type — one type
+    # covers a Thu-only offer and a Fri-only offer.
+    day_scope: str | None = None  # 'single' / 'specific' / 'choose' / 'all'
+    default_ticket_count: int | None = None
+    default_hold_timing: str | None = None  # 'now' / 'on_confirm' / 'later'
 
 
 class GuestTypeResponse(BaseModel):
@@ -24,6 +34,9 @@ class GuestTypeResponse(BaseModel):
     event_id: uuid.UUID
     name: str
     guest_mode: str | None = None
+    day_scope: str | None = None
+    default_ticket_count: int | None = None
+    default_hold_timing: str | None = None
     created_at: datetime
 
     class Config:

@@ -45,6 +45,10 @@ class RSVPInfoResponse(BaseModel):
     # The guest's actual experience ('invite' | 'distribute' | 'select'),
     # so the page renders the right interaction without re-deriving it.
     effective_mode: str = "invite"
+    # Choose-within-caps: total the guest may place when it's under the
+    # sum of their day grants (grants become ceilings). Null otherwise.
+    spend_total: Optional[int] = None
+    choose_within_caps: bool = False
     # RSVP'd yes but seating couldn't resolve — page shows the soft
     # "your ticket will arrive once seating is finalized" message.
     needs_seating: bool = False

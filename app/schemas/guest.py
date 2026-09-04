@@ -20,7 +20,8 @@ class GuestCreateRequest(BaseModel):
     allocation_status: Literal["confirmed", "pending", "declined"] = "confirmed"
     party_size: int = Field(default=1, ge=1)
     visit_date: Optional[str] = None
-    hold_timing: Literal["now", "on_confirm", "later"] = "now"
+    hold_timing: Optional[Literal["now", "on_confirm", "later"]] = None  # None = guest type default, else "now"
+    spend_total: Optional[int] = Field(default=None, ge=1)
     cohort_together: bool = True
     perks: Optional[str] = None
     comments: Optional[str] = None
@@ -37,7 +38,8 @@ class GuestUpdateRequest(BaseModel):
     allocation_status: Literal["confirmed", "pending", "declined"] = "confirmed"
     party_size: int = Field(default=1, ge=1)
     visit_date: Optional[str] = None
-    hold_timing: Literal["now", "on_confirm", "later"] = "now"
+    hold_timing: Optional[Literal["now", "on_confirm", "later"]] = None  # None = guest type default, else "now"
+    spend_total: Optional[int] = Field(default=None, ge=1)
     cohort_together: bool = True
     perks: Optional[str] = None
     comments: Optional[str] = None
@@ -74,6 +76,7 @@ class GuestResponse(BaseModel):
     seat_labels: List[str] = []  # assigned seats, display order
     link_sent_at: Optional[datetime] = None
     tickets_sent_at: Optional[datetime] = None
+    spend_total: Optional[int] = None
     created_at: datetime
 
     class Config:

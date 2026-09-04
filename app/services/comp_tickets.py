@@ -44,13 +44,34 @@ def effective_guest_mode(db: Session, guest: Guest, allotment: dict | None = Non
         gt = db.query(GuestType).filter(GuestType.id == guest.guest_type_id).first()
         if gt and gt.guest_mode in GUEST_MODES:
             return gt.guest_mode
-    if allotment is None:
-        from app.services import seating
+    # Auto retired (0039): a modeless guest is a plain invite, full
+    # stop. The legacy inference — "holds per-day grants, must be a
+    # distributor" — silently turned invitees with day grants into
+    # distributors and ignored their grants at minting. Distribution is
+    # now always an explicit choice (guest or type mode 'distribute').
+    return "invite"
 
-        allotment = seating.effective_allotment(db, guest)
-    from app.services import seating
 
-    return "distribute" if seating.is_allotment_holder(allotment) else "invite"
+def effective_spend_total(db: Session, guest: Guest, allotment: dict, mode: str | None = None) -> int:
+    """
+    The TOTAL tickets this guest may take. spend_total when set; else
+    legacy 'select' guests keep their party_size total; else a 'choose'
+    day-scope type defaults to its ticket count; else simply the sum of
+    the per-day grants (a fixed offer). Whenever this comes back LESS
+    than the sum, the grants are ceilings and the guest chooses where
+    to spend — universally, regardless of mode.
+    """
+    cap_sum = sum(allotment.values()) if allotment else 0
+    if guest.spend_total is not None:
+        return min(guest.spend_total, cap_sum) if cap_sum else guest.spend_total
+    mode = mode or effective_guest_mode(db, guest, allotment)
+    if mode == "select":
+        return min(guest.party_size or 1, cap_sum) if cap_sum else (guest.party_size or 1)
+    if guest.guest_type_id:
+        gt = db.query(GuestType).filter(GuestType.id == guest.guest_type_id).first()
+        if gt and gt.day_scope == "choose" and gt.default_ticket_count:
+            return min(gt.default_ticket_count, cap_sum) if cap_sum else gt.default_ticket_count
+    return cap_sum
 
 
 def get_event_settings_row(db: Session, event_id) -> EventSettings | None:
@@ -431,6 +452,57 @@ def send_cancellation_email(db: Session, guest: Guest, ticket_count: int, note: 
     ]
     text = "\n".join(lines)
     html = "<p>" + "</p><p>".join(l for l in lines if l) + "</p>"
+    from app.services.email import send_email
+
+    try:
+        send_email(to=guest.email, subject=subject, text_body=text, html_body=html)
+        return True
+    except Exception:
+        return False
+
+
+def send_invite_email(db: Session, guest: Guest, rsvp_link: str) -> bool:
+    """
+    The direct-invite email — what portal recipients always had and
+    invitees never did. Their RSVP link, the event name, and what
+    they've been offered. Best-effort like every send; the caller
+    stamps link_sent_at only when this returns True, so the dashboard's
+    sent-state stays honest.
+    """
+    if not guest.email:
+        return False
+    profile = db.query(EventProfile).filter(EventProfile.event_id == guest.event_id).first()
+    event_name = profile.title if profile else "your event"
+    from app.services import seating
+
+    allot = seating.effective_allotment(db, guest)
+    mode = effective_guest_mode(db, guest, allot)
+    total = effective_spend_total(db, guest, allot, mode) if allot else 0
+    cap_sum = sum(allot.values()) if allot else 0
+    if allot and total and total < cap_sum:
+        offer = f"You have {total} ticket{'s' if total != 1 else ''} to use across: " + ", ".join(
+            f"{d} (up to {q})" for d, q in sorted(allot.items())
+        )
+    elif allot:
+        offer = "You're offered: " + ", ".join(f"{q} ticket{'s' if q != 1 else ''} for {d}" for d, q in sorted(allot.items()))
+    elif guest.visit_date:
+        n = guest.party_size or 1
+        offer = f"You're offered {n} ticket{'s' if n != 1 else ''} for {guest.visit_date}."
+    else:
+        n = guest.party_size or 1
+        offer = f"You're offered {n} ticket{'s' if n != 1 else ''}."
+    subject = f"You're invited — {event_name}"
+    lines = [
+        f"Hi {guest.name},",
+        "",
+        f"You're invited to {event_name}.",
+        offer,
+        "",
+        f"Please respond here: {rsvp_link}",
+    ]
+    text = "\n".join(lines)
+    html = "<p>" + "</p><p>".join(l for l in lines if l) + "</p>"
+    html = html.replace(rsvp_link, f'<a href="{rsvp_link}">{rsvp_link}</a>')
     from app.services.email import send_email
 
     try:

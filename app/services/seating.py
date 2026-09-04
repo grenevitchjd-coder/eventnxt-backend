@@ -397,6 +397,28 @@ def effective_allotment(db: Session, guest: Guest) -> dict:
     """
     if guest.allocated_by_guest_id is not None:
         return {}
+    # Shape-derived grants (0039): a type declaring day_scope 'all' or
+    # 'choose' with a default count yields grants against the event's
+    # CURRENT days whenever the guest has no explicit rows — so 'all
+    # days' offers self-heal when Events360 shifts the dates. 'single'
+    # and 'specific' scopes carry no dates at type level by design;
+    # their days live on the guest (visit_date / explicit rows).
+    if not guest.ticket_allotment_overridden and guest.guest_type_id:
+        from app.models.guest_type import GuestType as _GT
+
+        gt = db.query(_GT).filter(_GT.id == guest.guest_type_id).first()
+        if gt and gt.day_scope in ("all", "choose") and gt.default_ticket_count:
+            explicit = (
+                db.query(GuestTypeTicketAllotment)
+                .filter(GuestTypeTicketAllotment.guest_type_id == guest.guest_type_id)
+                .count()
+            )
+            if not explicit:
+                from app.services.comp_tickets import event_days_for
+
+                days = event_days_for(db, guest.event_id)
+                if days:
+                    return {d: gt.default_ticket_count for d in days}
 
     if guest.ticket_allotment_overridden:
         rows = db.query(GuestTicketAllotment).filter(GuestTicketAllotment.guest_id == guest.id).all()

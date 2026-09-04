@@ -1,4 +1,5 @@
 # eventnxt-backend: app/routers/guests.py
+import uuid
 import secrets
 from datetime import datetime, timezone
 
@@ -88,6 +89,7 @@ def _serialize_guest(db: Session, guest: Guest) -> GuestResponse:
         seat_labels=[s.label for s in seats_service.guest_seats(db, guest.id)],
         link_sent_at=guest.link_sent_at,
         tickets_sent_at=guest.tickets_sent_at,
+        spend_total=guest.spend_total,
         created_at=guest.created_at,
     )
 
@@ -175,7 +177,8 @@ def create_guest(
         allocation_status=GuestAllocationStatus(payload.allocation_status),
         party_size=payload.party_size,
         visit_date=payload.visit_date,
-        hold_timing=payload.hold_timing,
+        hold_timing=payload.hold_timing or guest_type.default_hold_timing or "now",
+        spend_total=payload.spend_total,
         cohort_together=payload.cohort_together,
         perks=payload.perks,
         comments=payload.comments,
@@ -281,7 +284,8 @@ def update_guest(
     guest.allocation_status = GuestAllocationStatus(payload.allocation_status)
     guest.party_size = payload.party_size
     guest.visit_date = payload.visit_date
-    guest.hold_timing = payload.hold_timing
+    guest.hold_timing = payload.hold_timing or guest.hold_timing or "now"
+    guest.spend_total = payload.spend_total
     guest.cohort_together = payload.cohort_together
     guest.perks = payload.perks
     guest.comments = payload.comments
@@ -723,3 +727,71 @@ def guest_door_roster(
             }
         )
     return out
+
+
+class SendInviteRequest(BaseModel):
+    rsvp_base_url: str  # the frontend origin, e.g. https://eventnxt.events360.app — link = {base}/rsvp/{token}
+
+
+@router.post("/{guest_id}/send-invite", response_model=GuestResponse)
+def send_guest_invite(
+    event_id: str,
+    guest_id: str,
+    payload: SendInviteRequest,
+    db: Session = Depends(get_db),
+    user: CurrentUser = Depends(require_event_access),
+):
+    """
+    Email one direct invitee their RSVP link (offer summary included)
+    and stamp link_sent_at on success. Distributor portal links keep
+    their own flow; this is the invite-side counterpart.
+    """
+    guest = db.query(Guest).filter(Guest.id == guest_id, Guest.event_id == event_id).first()
+    if not guest:
+        raise HTTPException(status_code=404, detail="Guest not found.")
+    link = payload.rsvp_base_url.rstrip("/") + "/rsvp/" + guest.rsvp_token
+    if comp_tickets.send_invite_email(db, guest, link):
+        guest.link_sent_at = datetime.now(timezone.utc)
+        db.commit()
+        db.refresh(guest)
+    else:
+        raise HTTPException(status_code=400, detail="Email didn't send — check the event's email settings (SMTP) and the guest's address.")
+    return _serialize_guest(db, guest)
+
+
+class SendInvitesBulkRequest(BaseModel):
+    rsvp_base_url: str
+    guest_ids: Optional[list[uuid.UUID]] = None  # omit = every unsent direct invitee
+
+
+@router.post("/send-invites")
+def send_guest_invites_bulk(
+    event_id: str,
+    payload: SendInvitesBulkRequest,
+    db: Session = Depends(get_db),
+    user: CurrentUser = Depends(require_event_access),
+):
+    """
+    "Email all unsent": every direct invitee (never distributors, never
+    delegated recipients — those have their own flows) with no
+    link_sent_at stamp, or the explicit ids given. Each send stamps on
+    success and skips on failure; returns {sent, failed} so the
+    organizer knows exactly where things stand.
+    """
+    q = db.query(Guest).filter(Guest.event_id == event_id, Guest.allocated_by_guest_id.is_(None))
+    if payload.guest_ids:
+        q = q.filter(Guest.id.in_(payload.guest_ids))
+    else:
+        q = q.filter(Guest.link_sent_at.is_(None))
+    sent = failed = 0
+    base = payload.rsvp_base_url.rstrip("/")
+    for guest in q.all():
+        if _is_allotment_holder(db, guest):
+            continue
+        if comp_tickets.send_invite_email(db, guest, f"{base}/rsvp/{guest.rsvp_token}"):
+            guest.link_sent_at = datetime.now(timezone.utc)
+            sent += 1
+        else:
+            failed += 1
+    db.commit()
+    return {"sent": sent, "failed": failed}

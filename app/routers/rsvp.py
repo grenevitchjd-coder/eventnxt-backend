@@ -105,7 +105,14 @@ def _guest_extras(db: Session, guest: Guest, allotment: dict) -> dict:
         .first()
     )
     mode = comp_tickets.effective_guest_mode(db, guest, allotment)
-    available_days = sorted(allotment.keys()) if mode == "select" else None
+    spend_total = comp_tickets.effective_spend_total(db, guest, allotment, mode) if allotment else None
+    cap_sum = sum(allotment.values()) if allotment else 0
+    # Choose-within-caps is DATA, not a mode: whenever the total is
+    # less than the sum of the day grants, the grants are ceilings and
+    # the guest picks where to spend. (Legacy 'select' guests land here
+    # automatically via their party-size total.)
+    choose = bool(allotment) and spend_total is not None and spend_total < cap_sum
+    available_days = sorted(allotment.keys()) if choose else None
     day_grants = (
         [DayGrantItem(date=d, quantity=q) for d, q in sorted(allotment.items())]
         if allotment and mode in ("invite", "select")
@@ -113,6 +120,8 @@ def _guest_extras(db: Session, guest: Guest, allotment: dict) -> dict:
     )
     return {
         "day_grants": day_grants,
+        "spend_total": spend_total if choose else None,
+        "choose_within_caps": choose,
         "effective_mode": mode,
         "needs_seating": bool(guest.needs_seating),
         "available_days": available_days,
@@ -223,12 +232,13 @@ def respond_to_rsvp(token: str, payload: RSVPRespondRequest, db: Session = Depen
                 )
             cleaned[d] = q
         accepted = {d: q for d, q in cleaned.items() if q > 0}
-        if mode == "select":
+        spend_cap = comp_tickets.effective_spend_total(db, guest, allotment, mode)
+        if spend_cap and spend_cap < sum(allotment.values()):
             total = sum(cleaned.values())
-            if total > (guest.party_size or 1):
+            if total > spend_cap:
                 raise HTTPException(
                     status_code=400,
-                    detail=f"You have {guest.party_size} tickets to place — that adds up to {total}.",
+                    detail=f"You have {spend_cap} tickets to place — that adds up to {total}.",
                 )
         if not accepted:
             raise HTTPException(status_code=400, detail="Pick at least one ticket, or decline instead.")

@@ -120,6 +120,11 @@ class Guest(Base):
     # this guest's actual tickets were sent (ordered on the external
     # platform and delivered). Null = not yet. See migration 0038.
     tickets_sent_at = Column(DateTime(timezone=True), nullable=True)
+    # Choose-within-caps (0039): the TOTAL tickets this guest may take
+    # when it's less than the sum of their per-day grants — the grants
+    # become ceilings and the RSVP page lets them choose where to spend.
+    # Null = total is simply the sum (fixed offer).
+    spend_total = Column(Integer, nullable=True)
 
     # Free-text extras an organizer might track per guest — comp items
     # beyond the ticket itself (drinks, a gift bag) and general notes.
