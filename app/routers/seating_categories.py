@@ -366,3 +366,43 @@ def get_seating_summary(
             )
         )
     return rows
+
+@router.get("/holds/labeled")
+def labeled_seat_holds(
+    event_id: str,
+    db: Session = Depends(get_db),
+    user: CurrentUser = Depends(require_event_access),
+):
+    """
+    Every LABELED reserved-seat hold in the event, grouped — so the
+    Invites page can wave a flag on a guest's row when seats are
+    already being held under their name ("Carey Grant × 2 in Row 1
+    Front Center") and walk the organizer straight into claiming them.
+    Unassigned blocks only; a seat already assigned to a guest is that
+    guest's business.
+    """
+    from app.models.seat import Seat
+
+    rows = (
+        db.query(Seat.block_label, Seat.seating_category_id, func.count(Seat.id))
+        .join(SeatingCategory, SeatingCategory.id == Seat.seating_category_id)
+        .filter(
+            SeatingCategory.event_id == event_id,
+            Seat.is_blocked.is_(True),
+            Seat.guest_id.is_(None),
+            Seat.block_label.isnot(None),
+            Seat.block_label != "",
+        )
+        .group_by(Seat.block_label, Seat.seating_category_id)
+        .all()
+    )
+    pools = {c.id: c.name for c in db.query(SeatingCategory).filter(SeatingCategory.event_id == event_id).all()}
+    return [
+        {
+            "block_label": label,
+            "seating_category_id": str(cat_id),
+            "pool_name": pools.get(cat_id, ""),
+            "count": int(n),
+        }
+        for label, cat_id, n in rows
+    ]
