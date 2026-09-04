@@ -216,8 +216,6 @@ def restamp_guest_tickets(db: Session, guest) -> None:
     for t in tickets:
         if t.seat_id is not None and t.seat_id not in assigned_ids:
             t.seat_id = None
-    carried = {t.seat_id for t in tickets if t.seat_id}
-    free_seats = [s for s in assigned if s.id not in carried]
     # Multi-day guard: a seat lives in ONE night's pool, so it stamps
     # onto a code for THAT night. The pool's night is read from any
     # dated ticket type selling it (the fan-out shape); a pool no dated
@@ -236,17 +234,40 @@ def restamp_guest_tickets(db: Session, guest) -> None:
         ):
             pool_day.setdefault(cat_id, vd)
 
-    def stampable(t, seat):
+    guest_days = sorted({t.valid_date for t in tickets if t.valid_date})
+
+    def free_ticket(pred):
+        return next((t for t in tickets if t.seat_id is None and pred(t)), None)
+
+    for seat in assigned:
         day = pool_day.get(seat.seating_category_id)
         if day is not None:
-            return t.valid_date == day or t.valid_date is None
-        return t.valid_date is None or t.valid_date == guest.visit_date
-
-    for seat in list(free_seats):
-        target = next((t for t in tickets if t.seat_id is None and stampable(t, seat)), None)
-        if target is not None:
-            target.seat_id = seat.id
-            free_seats.remove(seat)
+            # Single-night pool: the seat belongs on that night's code.
+            if any(t.seat_id == seat.id for t in tickets):
+                continue
+            target = free_ticket(lambda t: t.valid_date == day or t.valid_date is None)
+            if target is not None:
+                target.seat_id = seat.id
+        elif guest_days and guest.visit_date is None:
+            # Dayless pool + dated codes: the chair is theirs EVERY
+            # night — stamp it onto one code per day, so each night's
+            # door scan (and each day's ticket PDF) shows the seat.
+            # Multiple VALID tickets sharing a seat_id is fine here:
+            # buyer-conflict checks key off is_blocked/guest_id, and
+            # the per-day check below keeps re-runs idempotent.
+            for d in guest_days:
+                if any(t.seat_id == seat.id and t.valid_date == d for t in tickets):
+                    continue
+                target = free_ticket(lambda t, d=d: t.valid_date == d)
+                if target is not None:
+                    target.seat_id = seat.id
+        else:
+            # Undated codes / single-day guests: the old rule.
+            if any(t.seat_id == seat.id for t in tickets):
+                continue
+            target = free_ticket(lambda t: t.valid_date is None or t.valid_date == guest.visit_date)
+            if target is not None:
+                target.seat_id = seat.id
 
 
 def assign_guest_seats(db: Session, *, guest, seat_ids: list[uuid.UUID]) -> list[Seat]:

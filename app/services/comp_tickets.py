@@ -417,7 +417,22 @@ def send_comp_ticket_email(db: Session, guest: Guest, tickets: list[Ticket], not
     try:
         from app.services.email import send_email
 
-        send_email(to=guest.email, subject=f"Your ticket{plural} for {event_name}", text_body=text, html_body=html)
+        # Per-day PDF attachments: thursday.pdf / friday.pdf / … — each
+        # headed with the day and its ticket count, one QR block per
+        # code. PDF trouble never blocks the email itself.
+        try:
+            from app.services.ticket_pdf import day_ticket_pdfs
+
+            attachments = day_ticket_pdfs(
+                event_name,
+                [
+                    {"code": t.code, "valid_date": t.valid_date, "seat_label": seat_for(t), "holder_name": guest.name}
+                    for t in tickets
+                ],
+            )
+        except Exception:
+            attachments = None
+        send_email(to=guest.email, subject=f"Your ticket{plural} for {event_name}", text_body=text, html_body=html, attachments=attachments)
         return True
     except Exception:
         return False

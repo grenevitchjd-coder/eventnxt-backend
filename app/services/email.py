@@ -40,10 +40,18 @@ def is_email_configured() -> bool:
     return bool(settings.smtp_host and settings.smtp_user and settings.smtp_password and settings.mail_from)
 
 
-def send_email(to: str, subject: str, text_body: str, html_body: str | None = None) -> None:
+def send_email(
+    to: str,
+    subject: str,
+    text_body: str,
+    html_body: str | None = None,
+    attachments: list[tuple[str, bytes, str]] | None = None,
+) -> None:
     """
     Send one email. Plain-text always; HTML added as the rich alternative
     when provided (clients that can't render HTML fall back to the text).
+    attachments: optional (filename, bytes, mimetype) tuples — used for
+    the per-day ticket PDFs.
     """
     if not is_email_configured():
         raise EmailNotConfigured(
@@ -57,6 +65,9 @@ def send_email(to: str, subject: str, text_body: str, html_body: str | None = No
     msg.set_content(text_body)
     if html_body:
         msg.add_alternative(html_body, subtype="html")
+    for filename, data, mimetype in attachments or []:
+        maintype, _, subtype = mimetype.partition("/")
+        msg.add_attachment(data, maintype=maintype, subtype=subtype or "octet-stream", filename=filename)
 
     try:
         # Port 587 + STARTTLS — the provider-standard path (and Heroku
