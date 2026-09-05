@@ -39,4 +39,7 @@ class GuestType(Base):
     day_scope = Column(String, nullable=True)
     default_ticket_count = Column(Integer, nullable=True)
     default_hold_timing = Column(String, nullable=True)  # 'now' / 'on_confirm' / 'later'
+    # Type-level default for guests.spend_total (0040): the across-days
+    # cap stamped onto each guest at add. Explicit payload wins.
+    default_spend_total = Column(Integer, nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())

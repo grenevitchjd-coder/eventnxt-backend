@@ -51,6 +51,7 @@ def create_guest_type(
         guest_mode=payload.guest_mode,
         day_scope=payload.day_scope,
         default_ticket_count=payload.default_ticket_count,
+        default_spend_total=payload.default_spend_total,
         default_hold_timing=payload.default_hold_timing,
     )
     db.add(guest_type)
@@ -79,6 +80,7 @@ def update_guest_type(
     guest_type.guest_mode = payload.guest_mode
     guest_type.day_scope = payload.day_scope
     guest_type.default_ticket_count = payload.default_ticket_count
+    guest_type.default_spend_total = payload.default_spend_total
     guest_type.default_hold_timing = payload.default_hold_timing
     db.commit()
     db.refresh(guest_type)

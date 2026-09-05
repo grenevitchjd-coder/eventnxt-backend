@@ -178,7 +178,7 @@ def create_guest(
         party_size=payload.party_size,
         visit_date=payload.visit_date,
         hold_timing=payload.hold_timing or guest_type.default_hold_timing or "now",
-        spend_total=payload.spend_total,
+        spend_total=payload.spend_total if payload.spend_total is not None else guest_type.default_spend_total,
         cohort_together=payload.cohort_together,
         perks=payload.perks,
         comments=payload.comments,

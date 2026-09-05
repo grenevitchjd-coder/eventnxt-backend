@@ -17,6 +17,7 @@ class GuestTypeCreateRequest(BaseModel):
     day_scope: str | None = None  # 'single' / 'specific' / 'choose' / 'all'
     default_ticket_count: int | None = None
     default_hold_timing: str | None = None  # 'now' / 'on_confirm' / 'later'
+    default_spend_total: int | None = None
 
 
 class GuestTypeUpdateRequest(BaseModel):
@@ -27,6 +28,7 @@ class GuestTypeUpdateRequest(BaseModel):
     day_scope: str | None = None  # 'single' / 'specific' / 'choose' / 'all'
     default_ticket_count: int | None = None
     default_hold_timing: str | None = None  # 'now' / 'on_confirm' / 'later'
+    default_spend_total: int | None = None
 
 
 class GuestTypeResponse(BaseModel):
@@ -37,6 +39,7 @@ class GuestTypeResponse(BaseModel):
     day_scope: str | None = None
     default_ticket_count: int | None = None
     default_hold_timing: str | None = None
+    default_spend_total: int | None = None
     created_at: datetime
 
     class Config:
