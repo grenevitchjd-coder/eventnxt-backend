@@ -110,6 +110,55 @@ def pool_for_day(db: Session, base_pool_id, visit_date):
     return sibling.seating_category_id if sibling else base_pool_id
 
 
+def resolve_parent_override(db: Session, parent, recipient_party: int, visit_date):
+    """
+    An allotment's explicit RECIPIENT seating (recipient_seating_category_id /
+    recipient_section_label — organizer intent, never auto-filled) steers its
+    recipients AHEAD of type priorities (2026-09-05 slice — before this,
+    there was no per-allotment control at all — only type priorities). Day-aware: the holder stores a family representative;
+    each recipient lands in the sibling pool serving their night.
+    Returns (category_id, section_label) when the chosen pool/section
+    has room for the recipient's party, else (None, None) — the caller
+    falls back to the ordinary priority walk, so a full section degrades
+    gracefully instead of blocking the yes.
+    """
+    from app.models.zone_section import ZoneSection
+
+    if parent is None or not parent.recipient_seating_category_id:
+        return (None, None)
+    pool_id = pool_for_day(db, parent.recipient_seating_category_id, visit_date)
+    category = db.query(SeatingCategory).filter(SeatingCategory.id == pool_id).first()
+    if category is None:
+        return (None, None)
+    wanted = parent.recipient_section_label or None
+    if wanted:
+        exists = (
+            db.query(ZoneSection.id)
+            .filter(ZoneSection.seating_category_id == category.id, ZoneSection.section_label == wanted)
+            .first()
+        )
+        if exists and section_room_for_comps(db, category, wanted) >= recipient_party:
+            return (category.id, wanted)
+        # chosen section missing/full on this night -> try the rest of
+        # the holder's pool before giving up to priorities
+    labels = [
+        r[0]
+        for r in db.query(ZoneSection.section_label)
+        .filter(ZoneSection.seating_category_id == category.id)
+        .order_by(ZoneSection.sort_order)
+        .all()
+    ]
+    if not labels:
+        # sectionless pool: pool-level room check
+        return (category.id, None) if section_room_for_comps(db, category, None) >= recipient_party else (None, None)
+    for lbl in labels:
+        if lbl == wanted:
+            continue
+        if section_room_for_comps(db, category, lbl) >= recipient_party:
+            return (category.id, lbl)
+    return (None, None)
+
+
 def resolve_seating_from_priorities(db: Session, event_id: str, guest_type_id: str, party_size: int = 1, visit_date=None):
     """Pool-only view of resolve_seating_placement, kept for call sites
     that only store a category (redemptions, request approval)."""
@@ -132,7 +181,13 @@ def _pool_day(db: Session, category_id) -> str | None:
     return row[0] if row else None
 
 
-def guest_hold_heads(db: Session, category: SeatingCategory, section_label: str | None = None, exclude_guest_id=None) -> int:
+def guest_hold_heads(
+    db: Session,
+    category: SeatingCategory,
+    section_label: str | None = None,
+    exclude_guest_id=None,
+    status_mode: str | None = None,
+) -> int:
     """
     Heads comps hold against this pool (optionally one section of it),
     as the SALES side must see them: confirmed guests always; pending
@@ -146,13 +201,25 @@ def guest_hold_heads(db: Session, category: SeatingCategory, section_label: str 
     from app.models.seat import Seat
 
     day = _pool_day(db, category.id)
+    # status_mode: None = the SALES view (confirmed + pending-with-now
+    # holds — what checkout must respect); 'confirmed' = committed heads
+    # only; 'offered' = pending + confirmed regardless of hold timing
+    # (the organizer's full-exposure view for the summary page).
+    if status_mode == "confirmed":
+        status_filter = Guest.allocation_status == GuestAllocationStatus.CONFIRMED
+    elif status_mode == "offered":
+        status_filter = Guest.allocation_status.in_(
+            [GuestAllocationStatus.PENDING, GuestAllocationStatus.CONFIRMED]
+        )
+    else:
+        status_filter = or_(
+            Guest.allocation_status == GuestAllocationStatus.CONFIRMED,
+            (Guest.allocation_status == GuestAllocationStatus.PENDING) & (Guest.hold_timing == "now"),
+        )
     q = db.query(Guest).filter(
         Guest.event_id == category.event_id,
         Guest.seating_category_id.isnot(None),
-        or_(
-            Guest.allocation_status == GuestAllocationStatus.CONFIRMED,
-            (Guest.allocation_status == GuestAllocationStatus.PENDING) & (Guest.hold_timing == "now"),
-        ),
+        status_filter,
     )
     if section_label is not None:
         q = q.filter(Guest.section_label == section_label)

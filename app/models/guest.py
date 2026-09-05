@@ -64,6 +64,10 @@ class Guest(Base):
     # (resolver or organizer). A label, not an FK — see the priority
     # model. NULL = floats at pool level (every pre-0031 comp).
     section_label = Column(String, nullable=True)
+    # Where this allotment's RECIPIENTS are placed (0041) — organizer
+    # intent only, never auto-filled. NULL = the type's priorities.
+    recipient_seating_category_id = Column(UUID(as_uuid=True), nullable=True)
+    recipient_section_label = Column(String, nullable=True)
 
     allocation_status = Column(
         SAEnum(

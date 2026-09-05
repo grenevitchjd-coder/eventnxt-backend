@@ -72,6 +72,8 @@ def _serialize_guest(db: Session, guest: Guest) -> GuestResponse:
         party_size=guest.party_size,
         perks=guest.perks,
         comments=guest.comments,
+        recipient_seating_category_id=guest.recipient_seating_category_id,
+        recipient_section_label=guest.recipient_section_label,
         ticket_allotment_overridden=guest.ticket_allotment_overridden,
         ticket_allotment=[TicketAllotmentDayItem(date=r.date, quantity=r.quantity) for r in rows],
         allotment_total=allotment_total,
@@ -287,6 +289,10 @@ def update_guest(
     guest.hold_timing = payload.hold_timing or guest.hold_timing or "now"
     guest.spend_total = payload.spend_total
     guest.cohort_together = payload.cohort_together
+    # Recipient seating intent (0041): organizer-only fields — where this
+    # allotment's recipients land, ahead of the type's priorities.
+    guest.recipient_seating_category_id = payload.recipient_seating_category_id
+    guest.recipient_section_label = (payload.recipient_section_label or "").strip() or None
     guest.perks = payload.perks
     guest.comments = payload.comments
     guest.guest_mode = payload.guest_mode

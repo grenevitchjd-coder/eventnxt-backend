@@ -35,6 +35,8 @@ class GuestUpdateRequest(BaseModel):
     guest_type_id: uuid.UUID
     seating_category_id: Optional[uuid.UUID] = None
     section_label: Optional[str] = None
+    recipient_seating_category_id: Optional[uuid.UUID] = None
+    recipient_section_label: Optional[str] = None
     allocation_status: Literal["confirmed", "pending", "declined"] = "confirmed"
     party_size: int = Field(default=1, ge=1)
     visit_date: Optional[str] = None
@@ -55,6 +57,8 @@ class GuestResponse(BaseModel):
     guest_type_id: uuid.UUID
     seating_category_id: Optional[uuid.UUID] = None
     section_label: Optional[str] = None
+    recipient_seating_category_id: Optional[uuid.UUID] = None
+    recipient_section_label: Optional[str] = None
     allocation_status: str
     party_size: int
     perks: Optional[str] = None
