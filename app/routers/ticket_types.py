@@ -35,6 +35,7 @@ def _with_counts(db: Session, ticket_types: list[TicketType]) -> list[TicketType
         resp = TicketTypeAdminResponse.model_validate(t)
         c = avail[t.id]
         resp.sold, resp.held, resp.available = c["sold"], c["held"], c["available"]
+        resp.comp_held = c.get("comp_held", 0)
         resp.is_pass = t.id in pass_ids
         out.append(resp)
     return out

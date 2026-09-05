@@ -135,11 +135,36 @@ def pass_consumption_for(db: Session, member_type_ids: list) -> dict:
     return {mid: int(q or 0) for mid, q in rows}
 
 
+def _comp_holds_for(db: Session, ticket_types: list[TicketType]) -> dict[uuid.UUID, int]:
+    """
+    Per ticket type: heads held by COMP guests on the type's pool. Uses
+    guest_hold_heads, so it's day-aware via the pool's own day and
+    family-aware (a guest homed at any sibling counts against this
+    pool's day with that day's grant) — the exact numbers the seating
+    summary and per-section sales caps already use. Guests holding
+    actual seats are excluded there (their blocked seats consume), which
+    keeps this a pure heads-without-seats figure. Types with no pool
+    can't attribute comps and get 0.
+    """
+    from app.services.seating import guest_hold_heads  # local: avoids an import cycle
+
+    pool_ids = {t.seating_category_id for t in ticket_types if t.seating_category_id}
+    if not pool_ids:
+        return {}
+    pools = {c.id: c for c in db.query(SeatingCategory).filter(SeatingCategory.id.in_(pool_ids)).all()}
+    per_pool = {pid: guest_hold_heads(db, pool) for pid, pool in pools.items()}
+    return {t.id: per_pool.get(t.seating_category_id, 0) for t in ticket_types}
+
+
 def availability_for(db: Session, ticket_types: list[TicketType]) -> dict[uuid.UUID, dict]:
     ids = [t.id for t in ticket_types]
     counts = committed_quantities(db, ids)
     # Nightly types: subtract what passes have consumed of their nights.
     pass_taken = pass_consumption_for(db, ids)
+    # Comp guests holding this type's pool (day-aware): sellable stock
+    # shrinks by every promised head, so the admin numbers and the
+    # checkout clamp can never disagree with the seating side again.
+    comp_held = _comp_holds_for(db, ticket_types)
     # Pass types: can never sell past their thinnest night — available is
     # capped at the minimum member remaining (own cap still applies).
     pass_map = pass_members_for(db, ids)
@@ -148,18 +173,20 @@ def availability_for(db: Session, ticket_types: list[TicketType]) -> dict[uuid.U
         members_by_id = {m.id: m for ms in pass_map.values() for m in ms}
         mcounts = committed_quantities(db, list(members_by_id))
         mtaken = pass_consumption_for(db, list(members_by_id))
+        mcomp = _comp_holds_for(db, list(members_by_id.values()))
         for mid, m in members_by_id.items():
             c = mcounts[mid]
-            member_avail[mid] = max(0, m.quantity - c["sold"] - c["held"] - mtaken.get(mid, 0))
+            member_avail[mid] = max(0, m.quantity - c["sold"] - c["held"] - mtaken.get(mid, 0) - mcomp.get(mid, 0))
     out = {}
     for t in ticket_types:
         c = counts[t.id]
-        available = max(0, t.quantity - c["sold"] - c["held"] - pass_taken.get(t.id, 0))
+        available = max(0, t.quantity - c["sold"] - c["held"] - pass_taken.get(t.id, 0) - comp_held.get(t.id, 0))
         if t.id in pass_map:
             available = min(available, min(member_avail[m.id] for m in pass_map[t.id]))
         out[t.id] = {
             "sold": c["sold"],
             "held": c["held"],
+            "comp_held": comp_held.get(t.id, 0),
             "available": available,
         }
     return out

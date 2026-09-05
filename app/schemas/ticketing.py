@@ -47,6 +47,7 @@ class TicketTypeAdminResponse(BaseModel):
     # Computed, not stored — see services/ticketing.py availability math.
     sold: int = 0
     held: int = 0
+    comp_held: int = 0  # heads promised to comp guests on this type's pool (day-aware)
     available: int = 0
 
     class Config:
