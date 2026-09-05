@@ -119,6 +119,16 @@ h2 = add_holder("Plain Holder")
 r6 = give_and_rsvp(h2, "Finn Thu", D1)
 check("holder without a choice keeps priority placement", r6["seating_category_id"] == back["id"], str(r6["seating_category_id"][:8]))
 
+# --- portal payload: the holder's across-days cap rides along ---
+client.patch(f"/events/{EV}/guests/{h1['id']}", json={
+    "name": h1["name"], "email": h1["email"], "guest_type_id": gt["id"],
+    "seating_category_id": None, "section_label": None, "visit_date": None,
+    "allocation_status": "confirmed", "party_size": 1, "perks": None, "comments": None,
+    "guest_mode": "distribute", "hold_timing": "now", "spend_total": 7, "cohort_together": True,
+}, headers=H)
+info = client.get(f"/public/rsvp/{h1['rsvp_token']}").json()
+check("holder portal payload carries spend_total", info.get("is_allotment_holder") and info.get("spend_total") == 7, str(info.get("spend_total")))
+
 print()
 if failures:
     print(f"FAILED: {len(failures)}")

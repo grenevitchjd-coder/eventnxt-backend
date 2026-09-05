@@ -120,7 +120,7 @@ def _guest_extras(db: Session, guest: Guest, allotment: dict) -> dict:
     )
     return {
         "day_grants": day_grants,
-        "spend_total": spend_total if choose else None,
+        "spend_total": spend_total if (choose or mode == "distribute") else None,
         "choose_within_caps": choose,
         "effective_mode": mode,
         "needs_seating": bool(guest.needs_seating),
