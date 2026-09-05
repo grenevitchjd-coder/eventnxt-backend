@@ -5,9 +5,11 @@
 #      rsvp link (for manual forwarding)
 #   2. per-day budget math: distributed/remaining reflect entered
 #      recipients; over-budget distribution refused per day
-#   3. the distributor can REMOVE a still-pending recipient — the day's
-#      budget frees and the previously refused distribution now fits
-#   4. a confirmed recipient can't be removed from the portal
+#   3. the distributor can REMOVE a recipient — the day's budget frees
+#      and the previously refused distribution now fits
+#   4. removing a ticketed recipient VOIDS their comp codes and frees
+#      the budget (recipients confirm at distribution now; the sponsor
+#      manages their own list) — only a checked-in recipient is locked
 #   5. a recipient id from someone else's allocation is a 404
 #   6. distribute at an unconfigured-mail install doesn't crash (emails
 #      are best-effort)
@@ -106,9 +108,16 @@ def main():
     recips = r.json()["distributed_recipients"]
     cc = next(x for x in recips if x["name"] == "Client C")
     kid = next(g for g in client.get(f"/events/{EV}/guests", headers=H).json() if g["name"] == "Client C")
+    # auto-confirm: Client C is already CONFIRMED (a stray link click is a no-op)
     client.post(f"/public/rsvp/{kid['rsvp_token']}/respond", json={"attending": True})
+    before = {d["date"]: d for d in client.get(f"/public/rsvp/{tok}").json()["day_allotments"]}
     r = client.delete(f"/public/rsvp/{tok}/recipients/{cc['id']}")
-    check("confirmed recipient can't be removed", r.status_code == 400 and "organizer" in r.text, r.text)
+    after = {d["date"]: d for d in r.json()["day_allotments"]}
+    freed = after[kid["visit_date"]]["distributed"] == before[kid["visit_date"]]["distributed"] - kid["party_size"]
+    check("removing a ticketed recipient succeeds and frees the budget", r.status_code == 200 and freed,
+          f"{r.status_code} {r.text[:150]}")
+    gone = not any(g["name"] == "Client C" for g in client.get(f"/events/{EV}/guests", headers=H).json())
+    check("removed recipient is off the books", gone)
 
     # ---- 5: cross-allocation removal is a 404 ----
     other = client.post(f"/events/{EV}/guests",

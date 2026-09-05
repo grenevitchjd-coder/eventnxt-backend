@@ -85,11 +85,14 @@ def add_holder(name, seat_pool=None, section=None):
 
 
 def give_and_rsvp(holder, rec_name, date, qty=1):
+    # Recipients don't RSVP — distribution itself confirms, places, and
+    # mints. A stray click on their old link must be a no-op (guarded in
+    # /respond), which this exercises too.
     client.post(f"/public/rsvp/{holder['rsvp_token']}/distribute", json={"recipients": [{"name": rec_name, "email": f"{rec_name.lower().replace(' ', '')}@x.com", "visit_date": date, "quantity": qty}]})
     rec = [x for x in client.get(f"/events/{EV}/guests", headers=H).json() if x["name"] == rec_name][0]
     _rr = client.post(f"/public/rsvp/{rec['rsvp_token']}/respond", json={"attending": True})
     if _rr.status_code >= 400:
-        print("respond failed:", _rr.status_code, _rr.text[:200])
+        print("stray respond failed:", _rr.status_code, _rr.text[:200])
     return [x for x in client.get(f"/events/{EV}/guests", headers=H).json() if x["name"] == rec_name][0]
 
 
@@ -118,6 +121,10 @@ check("exhausted holder pool falls back to type priorities",
 h2 = add_holder("Plain Holder")
 r6 = give_and_rsvp(h2, "Finn Thu", D1)
 check("holder without a choice keeps priority placement", r6["seating_category_id"] == back["id"], str(r6["seating_category_id"][:8]))
+
+# --- distribution IS confirmation: no RSVP round-trip, tickets minted ---
+r_direct = [x for x in client.get(f"/events/{EV}/guests", headers=H).json() if x["name"] == "Rio Fri"][0]
+check("recipients confirm at distribution (no RSVP needed)", r_direct["allocation_status"] == "confirmed" and r_direct["ticket_count"] >= 1, str({"status": r_direct["allocation_status"], "codes": r_direct["ticket_count"]}))
 
 # --- portal payload: the holder's across-days cap rides along ---
 client.patch(f"/events/{EV}/guests/{h1['id']}", json={

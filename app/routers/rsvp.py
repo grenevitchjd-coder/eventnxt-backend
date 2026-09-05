@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session
 
 from app.config import settings as app_settings
 from app.database import get_db
+from app.models.ticket import Ticket, TicketStatus
 from app.models.guest import Guest, GuestAllocationStatus
 from app.models.guest_type import GuestType
 from app.models.promo_code import PromoCode, RewardType
@@ -262,6 +263,16 @@ def respond_to_rsvp(token: str, payload: RSVPRespondRequest, db: Session = Depen
                 )
             guest.visit_date = payload.visit_date
 
+        # Recipients confirm at distribution now — a stray click on their
+        # link must not re-run placement (they'd count themselves as
+        # occupying their section and hop to the next one). Their yes is
+        # already recorded; just report state.
+        if (
+            guest.allocated_by_guest_id
+            and guest.allocation_status == GuestAllocationStatus.CONFIRMED
+        ):
+            return get_rsvp_info(token, db)
+
         parent_cohort = True
         if guest.allocated_by_guest_id:
             parent_cohort = bool(
@@ -436,11 +447,51 @@ def distribute_tickets(token: str, payload: RSVPDistributeRequest, db: Session =
         db.add(c)
 
     db.commit()
-    # Each recipient gets their own invite email with their RSVP link —
-    # best-effort; the parent's portal shows the same links for manual
-    # forwarding when mail isn't configured.
+
+    # Recipients DON'T RSVP — the sponsor entering them IS the vouch
+    # (2026-09-05). Each one is confirmed on the spot: placed (the
+    # parent's explicit recipients-seating first, then the type's
+    # priorities), minted, and emailed their actual tickets. When no
+    # section has room, the soft-landing rule from the yes-path applies:
+    # they stay pending with needs_seating so the organizer's queue
+    # catches them and no phantom seat is counted.
+    parent_cohort = bool(guest.cohort_together)
     for c in children:
-        comp_tickets.send_recipient_invite_email(db, c, guest)
+        new_category_id, new_section_label = seating.resolve_parent_override(
+            db, guest, c.party_size, c.visit_date
+        )
+        if new_category_id is None:
+            new_category_id, new_section_label = seating.resolve_seating_placement(
+                db, str(c.event_id), str(c.guest_type_id), party_size=c.party_size,
+                visit_date=c.visit_date,
+                allocated_by_guest_id=c.allocated_by_guest_id, cohort_together=parent_cohort,
+            )
+        if new_category_id is None and seating.has_seating_priorities(db, str(c.guest_type_id)):
+            c.rsvp_confirmed = "yes"
+            c.needs_seating = True
+            continue
+        c.seating_category_id = new_category_id
+        c.section_label = new_section_label
+        c.allocation_status = GuestAllocationStatus.CONFIRMED
+        c.rsvp_confirmed = "yes"
+        c.needs_seating = False
+        # Placements happen back-to-back in this one request — flush so
+        # the NEXT sibling's room math sees this one (spread placement
+        # was packing everyone into the same section without it).
+        db.flush()
+    db.commit()
+    for c in children:
+        db.refresh(c)
+        if c.allocation_status == GuestAllocationStatus.CONFIRMED and comp_tickets.is_native_ticketing(db, c.event_id):
+            tickets = comp_tickets.issue_comp_tickets(db, c)
+            db.flush()
+            comp_tickets.send_comp_ticket_email(db, c, tickets)
+        else:
+            # external ticketing or needs-seating: they still get the
+            # heads-up email with their link (shows their status/tickets
+            # once resolved) — nothing asks them to RSVP anymore.
+            comp_tickets.send_recipient_invite_email(db, c, guest)
+    db.commit()
     return get_rsvp_info(token, db)
 
 
@@ -460,11 +511,27 @@ def remove_distributed_recipient(token: str, child_id: str, db: Session = Depend
     )
     if not child:
         raise HTTPException(status_code=404, detail="That recipient isn't on this allocation.")
-    if child.allocation_status == GuestAllocationStatus.CONFIRMED or comp_tickets.valid_comp_tickets(db, child):
+    # Recipients confirm at distribution now, so "already confirmed" can't
+    # mean untouchable — the sponsor manages their own list. Removing one
+    # voids any comp codes already issued (REFUNDED = invalid at the
+    # door), frees their seat, and returns the budget. The one hard stop:
+    # someone who has already walked through the door stays on the books.
+    checked_in = (
+        db.query(Ticket.id)
+        .filter(Ticket.guest_id == child.id, Ticket.checked_in_at.isnot(None))
+        .first()
+    )
+    if checked_in:
         raise HTTPException(
             status_code=400,
-            detail=f"{child.name} has already confirmed — ask the event organizer to make changes.",
+            detail=f"{child.name} has already checked in — ask the event organizer to make changes.",
         )
+    # Void every code and detach the rows (guest_id is nullable exactly
+    # for lineage like this) so the audit trail survives the delete.
+    for t in db.query(Ticket).filter(Ticket.guest_id == child.id).all():
+        t.status = TicketStatus.REFUNDED
+        t.guest_id = None
+    db.flush()
     db.delete(child)
     db.commit()
     return get_rsvp_info(token, db)
