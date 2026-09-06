@@ -1,6 +1,6 @@
 # eventnxt-backend: docs/HANDOFF.md
 # EventNXT — Handoff & Working Notes
-_Last updated: 2026-09-06 (the external-events session: slices 1–5, migrations 0049–0051)_
+_Last updated: 2026-09-06 (the external-events session: slices 1–6, migrations 0049–0052)_
 
 EventNXT is the casting/guest/ticketing app built for Tito's FashioNXT events
 (events360.app). Two repos: `eventnxt-backend` (FastAPI + SQLAlchemy + Alembic
@@ -171,7 +171,16 @@ canonical attorney-editable page at the frontend's public `/terms/referral`
 (`ReferralTermsPage.jsx` — the `/terms/purchase` pattern; PLACEHOLDER copy
 pending attorney review; §10-style support address still a placeholder):
 
-- *Payout terms* — a DISCLOSURE, three places: the portal-link email's
+- *Payout terms* — an ACCEPTANCE WALL (0052) plus disclosure. A referrer
+  who holds codes but hasn't signed sees ONLY the wall: terms summary,
+  full-legal-name input, checkbox — the portal payload withholds their
+  codes (`payout_terms_required`), the portal-link email carries no codes
+  or share links (accept-first wording, "Action needed" subject), and
+  /refer + /redeem 400 behind it. `POST /accept-payout-terms` requires a
+  first-and-last name (whitespace-normalized), stamps
+  `payout_terms_accepted_at` + `payout_terms_legal_name` (the e-signature
+  record), COMMITS at the gate, idempotent; the response is the unlocked
+  payload. The disclosure then lives in three places: the portal-link email's
   "About your payout" block, the portal progress tab above the code cards,
   and the full page. The commitments: rewards accrue at the terms in effect
   when each sale happens; the organizer may adjust terms for FUTURE sales so
@@ -426,7 +435,10 @@ face-value amount fill → percentage reward, day-token-beats-file-day, drink
 coupons out of room math, barcode dedup, per-night summary heads, legacy
 normalized-name fallback, the pool-level-optimism pin, and 0050 package rows
 counting into every night of a family and never into other families).
-`test_outreach` additionally pins the 0051 gate: refer without acceptance →
+`test_referral_setup` pins the 0052 wall (codes withheld + flag,
+single-name refusal, pre/post-signature email variants, refer refused
+behind the wall, legal-name recording); `test_outreach` signs the wall
+for its referrers up front and additionally pins the 0051 gate: refer without acceptance →
 400 naming the policy, nothing sent; acceptance stamped once and COMMITTED
 (survives a same-request failure like unpublished-event).
 
@@ -595,6 +607,9 @@ grep.
   packages counting into every night of a pool's name family.
 - **0051** `guests.outreach_terms_accepted_at` — the Outreach Policy gate
   on `/refer` (committed at the gate).
+- **0052** `guests.payout_terms_accepted_at` + `payout_terms_legal_name` —
+  the payout-terms acceptance wall (codes/links/portal withheld until
+  signed with a typed full legal name).
 
 ---
 
@@ -609,7 +624,7 @@ grep.
   NON-NATIVE events (replaced by the full room builder — it remains for
   native events as the press-row/holds panel).
 - **NEEDS-MIGRATION-FIRST — the `select` mode kill (spec'd, awaiting go)**:
-  migration **0052+** (renumbered a FOURTH time: 0045→0047→0048→0049-0051
+  migration **0053+** (renumbered a FIFTH time: 0045→0047→0048→0049-0052
   got used) converts `guest_mode='select'` → `'invite'`; then delete the
   mode from `comp_tickets.py` (GUEST_MODES + ~5 branches), the
   `schemas/guest.py` literals, the RSVP chooser fallback
@@ -668,7 +683,7 @@ grep.
 - **Stripe Tax** — parked until the first event in a taxing state
   (Oregon home base = no sales tax); agreement's tax clause + a CPA
   hour at that milestone.
-- **`select`-mode kill** — spec above (§7), now 0052+, needs Joshua's
+- **`select`-mode kill** — spec above (§7), now 0053+, needs Joshua's
   explicit go.
 - **Rebuild `multiday_smoke.cjs`** against current code (original lost);
   an external-fixture crash_hunt pass is a related candidate.
@@ -688,8 +703,10 @@ grep.
   native "Whole space" sold-by note; a real export through staging
   (mapping panel on mobile too) then a re-upload watching dupes skip; a
   fake weekend-pass row moving all nights' Sold at once; `/terms/referral`
-  once; one referrer through first-send acceptance on mobile; the
-  portal-link email's payout block in a real inbox; plus the standing
+  once; one fresh referrer through the payout-terms WALL on mobile
+  (pre-signature email → wall → unlock → codes) and then first-send
+  outreach acceptance; the post-signature portal-link email in a real
+  inbox; plus the standing
   items: checkout agree/marketing spacing on mobile, `/terms/purchase`,
   a fresh order's "✓ marketing OK" tag, Earnings/reserve strip wrapping
   on mobile, tickets tab on the real FashioNXT event, referrer portal on
