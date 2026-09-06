@@ -1,6 +1,6 @@
 # eventnxt-backend: docs/HANDOFF.md
 # EventNXT — Handoff & Working Notes
-_Last updated: 2026-09-06 (the Stripe Connect / reserve / purchasing-agreement session)_
+_Last updated: 2026-09-06 (the external-events session: slices 1–5, migrations 0049–0051)_
 
 EventNXT is the casting/guest/ticketing app built for Tito's FashioNXT events
 (events360.app). Two repos: `eventnxt-backend` (FastAPI + SQLAlchemy + Alembic
@@ -13,7 +13,10 @@ the GitHub web editor.
 before a UI reads them — a frontend deployed early makes edits *silently
 revert*, which has bitten twice: day-number edits and recipient-seating picks).
 And every pasted file gets a line-count check against the packaged copy —
-paste truncation is real.
+paste truncation is real. Delivered files carry their repo path both as the
+first-line comment AND encoded in the filename
+(`eventnxt-backend__app__services__sales.py`), so four files named `sales.py`
+can never be confused again.
 
 ---
 
@@ -28,14 +31,83 @@ tracking) and the CSV importer (Seating summary) HIDE behind a muted
 setting changes OR imported rows already exist (data's source is never
 hidden). `comp_delivery` governs comp code delivery.
 
+**External events — the parity principle (2026-09-06, slices 1–4).**
+Non-native = native minus exactly two things: tickets aren't minted/shipped
+(the organizer flips per-guest "✓ Tickets sent" markers, 0038), and sold
+inventory arrives by CSV/Excel import instead of live orders. Everything
+else — rooms, comps, priorities, day machinery, promo/referral tracking,
+reconciliation — is the SAME system fed by imported rows. Concretely:
+
+- *Room building*: Seats Setup renders the SAME composer for non-native
+  events minus the selling fields (price, max/order, admits, native day
+  fan-out) — "Add an area" creates bare structured pools (no ticket types),
+  listed in a "Your room" panel with the shared sections editor and the seat
+  reserve/block picker (seat-grain pools). Baked-in guidance: **one area per
+  product the outside platform sells** ("Row 2 Preferred", "Standing Room")
+  so imports reconcile per product. Ticket Tomato is the live case: one
+  sub-event per night, per-ticket exports (Last/First Name, Ticket Type,
+  Discounts coupon cells, Barcode).
+- *Day families without ticket types*: `pool_for_day` falls back to
+  POOL-NAME families when no dated ticket type exists — the same
+  `"<Base> (MM/DD)"` convention, normalized-name matched, bare base = FIRST
+  night. A pool-level fan-out endpoint
+  (`POST /seating-categories/{id}/fan-out`) clones a bare pool to every
+  event day (sections + fresh seats, holds NOT copied, idempotent, refuses
+  suffixed clones and pools sold by a ticket type). Wired to "Create for
+  every day" in the builder and an "Every day" row action. **The bare base =
+  first night is load-bearing convention**: hand-renaming a clone's suffix
+  drops it from its family and dated guests silently route to the base.
+- *Basis vocabulary*: "Room spaces (multi-ticket units)" is a composer basis
+  writing the SAME `table` sales_grain with selling-appropriate words
+  ("Spaces per section", "Tickets / space", native sold-by "Whole space") —
+  a room space IS a table structurally (a purchasable unit of N heads); no
+  new grain exists (modes derivable from data shouldn't).
+- *Assigned seats on external events*: the seat grid is the COMP-side
+  instrument (holds, hand-placements). Which specific seats outside buyers
+  took lives on the outside platform; pool-level counts reconcile.
+  Recipe for FashioNXT: Row 1 products = row basis + assigned (one section
+  per product is fine); everything else = Named area, one per product.
+
+**Imported-sales matching (0049).** THE match runs ONCE at import time
+(`services/sale_matching.py`) and stamps the Sale row
+(`seating_category_id` + `event_day` + `is_admission`); seating math reads
+the stamp — rename-proof, and display can never drift from enforcement.
+Resolution: saved mapping on the full normalized label → mapping on the
+day-stripped label ("THURSDAY – Row 3 Preferred" → "Row 3 Preferred") →
+pool-name match (normalized). The show day = a day token in the ticket name
+(weekday or MM/DD resolved against the event's REAL days; an ambiguous
+weekday never guesses) else the file-level day confirmed in staging; a
+purchase-date column NEVER routes days. The matched base pool day-routes
+through the same `pool_for_day` comps use. `sale_type_mappings` is the
+organizer's saved label→area answers (normalized key, unique per event) with
+optional `face_value_cents` (fills a missing amount = face − parsed coupon,
+so percentage rewards compute from price-less exports) and `is_admission`
+false for drink coupons/merch (imported + attributable, never in room math).
+Coupon cells ("Coupon VANESSA2510: -$6.50") attribute the referral code when
+no promo-code column exists. Barcode → `external_transaction_id` dedup, so
+re-uploading the growing export lands only new rows.
+
+**All-days packages (0050).** A "Weekend Pass" sold outside consumes a head
+EVERY night: the mapping's `all_days` flag ("Every night" in staging) stamps
+such rows to the family's BASE pool with NO single day, and
+`imported_heads_for_pool` counts them into every member of that pool's name
+family. Day tokens and the file-day selector are deliberately ignored for
+these rows. Design decision (confirmed): the package is an import mapping,
+NOT a product object in Seats Setup — the product catalog lives on the
+outside platform, and a second EventNXT copy would be the duplicate-inventory
+trap passes exist to avoid. (An optional pre-declare/display panel is a
+possible later polish, same table.) Comp-side weekend guests never needed
+any of this — all-days guest types worked already.
+
 **Pools (seating categories), sections, seats.** A pool has a
 `sales_grain`: `ga`, `row`, `table`, or `seat`. Row/table pools carry
 `ZoneSection` rows (label + capacity); seat pools carry actual `Seat` rows.
-Per-day events clone pools per night via ticket-type **fan-out**; clones are
-named `"<Base> (MM/DD)"` and form a **family**. The bare-named base pool serves
-the FIRST night. `pool_for_day` maps a family member + a date to the sibling
-serving that night — placement, hold counting, and the recipient override all
-route through it.
+Per-day events clone pools per night via ticket-type **fan-out** (native) or
+pool fan-out (external); clones are named `"<Base> (MM/DD)"` and form a
+**family**. The bare-named base pool serves the FIRST night. `pool_for_day`
+maps a family member + a date to the sibling serving that night — placement,
+hold counting, the recipient override, and now import stamping all route
+through it.
 
 **Ticket types** belong to pools, carry `valid_date` (null = pass/all-days),
 `admits` (a $400 table admitting 4 counts 4 heads), and fan out per night.
@@ -94,6 +166,31 @@ stamps who brought the buyer. Bonus tiers resolve via
 else event default) — the SAME resolution the award machinery runs, and the
 same one shown to referrers in the portal.
 
+**Referrer policies (0051, the program's legal surface).** Two policies, one
+canonical attorney-editable page at the frontend's public `/terms/referral`
+(`ReferralTermsPage.jsx` — the `/terms/purchase` pattern; PLACEHOLDER copy
+pending attorney review; §10-style support address still a placeholder):
+
+- *Payout terms* — a DISCLOSURE, three places: the portal-link email's
+  "About your payout" block, the portal progress tab above the code cards,
+  and the full page. The commitments: rewards accrue at the terms in effect
+  when each sale happens; the organizer may adjust terms for FUTURE sales so
+  later payouts won't necessarily match initial terms; **the portal always
+  shows current effective terms** (literally true — the cards render
+  `effective_bonus_tiers` through the award machinery's own resolution);
+  crossed volume bonuses final; settled post-event net of refunds; cash
+  rewards are the ORGANIZER's obligation (EventNXT provides the accounting —
+  the clause keeping EventNXT out of the payment-promise chain).
+- *Outreach Policy* — a GATE. `guests.outreach_terms_accepted_at`; `/refer`
+  enforces acceptance FIRST (before publish/code checks), 400s without it,
+  stamps once — and the stamp is COMMITTED at the gate, so a failed send
+  can't silently un-accept. Portal UX: a summary box + checkbox gating the
+  Send button on first send, collapsing to "accepted {date} · view" after.
+  Substance: known-contacts only, no purchased/harvested lists, truthful
+  event-related content, the tracked link + "sent through EventNXT" footer
+  may never be circumvented (appended server-side regardless), stop on
+  request, CAN-SPAM compliance, enforcement (suspend sending, void rewards).
+
 **Payments & money (migrations 0045–0048).** Stripe Connect, DESTINATION
 charges: EventNXT's platform account is merchant of record; buyers pay
 face value; the organizer's share transfers atomically to their
@@ -143,7 +240,12 @@ checkout) — RSVP-side consent is an offered, unbuilt slice.
 ## 2. Inventory math — the definitions (all code-verified)
 
 - **box_office**: heads bought with money — paid native orders × `admits`,
-  plus CSV-imported sales matched to the pool by name.
+  plus imported heads via the ONE shared `sales.imported_heads_for_pool`
+  (0049/0050): stamped rows by their `seating_category_id`; all-days
+  package rows counted into EVERY member of the pool's name family;
+  unstamped (pre-0049 / unmapped) rows by NORMALIZED-name fallback (the old
+  exact `ilike` silently dropped "Row 2 " with a trailing space — fixed);
+  non-admission rows (drink coupons) never counted anywhere.
 - **allotted**: every comp-side promise — `guest_hold_heads` in "offered" mode
   (confirmed guests PLUS pending guests with Pull "Now"), + guest-assigned
   seats, + labeled blocked-seat holds. "If every offer lands."
@@ -161,6 +263,13 @@ checkout) — RSVP-side consent is an offered, unbuilt slice.
   (`section_room_for_comps` decomposed). `test_section_summary` proves it by
   filling a section until the display says 0 and asserting the next recipient
   really overflows.
+- **Pool-level comp placement is deliberately OPTIMISTIC** (pinned as such,
+  2026-09-06): direct guest-type priority placement at pool level checks only
+  confirmed comp heads — comp-vs-buyer exposure at pool level is reconciled
+  on Seating summary, not enforced. What DOES honor imported/box-office heads
+  through `_pool_room_components`: the sectionless section-summary display
+  and the allotment-recipient room check. Whether external events should
+  hard-enforce at pool level is an OPEN policy question (§8).
 - **Sale aggregation is shared**: `services/sales.sale_aggregates_by_code`
   feeds BOTH the organizer's `/promo-stats` AND the referrer portal, so the
   org and the referrer always see one number (pinned by a portal==promo-stats
@@ -179,10 +288,17 @@ inputted isn't the final recipient." Both have two views ("Set up & send" /
 headers ("Thu" over "12/24"), ghost truthfulness (type defaults ghost into
 empty cells only while the guest still inherits; editing any day materializes
 the ghosted others into the save; overridden guests' ghosts go silent), and
-last-column `col-flex` slack.
+last-column `col-flex` slack. External events: Pull column hidden, per-row
+"✓ Tickets sent / Not sent" toggles + sent/not-sent filter instead.
 
-**Seats Setup**: type composer + type list + comp-only areas + reservations.
-Day chips (All · each night · All-days) filter both lists.
+**Seats Setup**: NATIVE = type composer + type list + comp-only areas +
+reservations, day chips filtering both lists. NON-NATIVE = the same composer
+as "Add an area" (no price/max/admits/native-fan-out; "Create for every day"
+via pool fan-out) + the "Your room" pool list (structure line, day pill,
+sections editor, seats reserve picker on seat grain, "Every day" action on
+bare pools, Delete) — the old GA-only comp quick-form is replaced there.
+The sections editor and seats picker are ONE shared implementation serving
+both lists (extracted 2026-09-06 — the two surfaces can't drift).
 
 **Event settings** gained the org-scoped **Payouts card** (status pill,
 Connect/Finish button → Stripe-hosted Express onboarding via one-time
@@ -201,7 +317,15 @@ marketing box.
 **Seating summary** (Manage): every pool as a block with per-section
 Capacity · Sold · Comps · Avail, same day chips, frozen header. The box-office
 **sales upload** (CSV/Excel with staging) lives at the bottom — hidden for
-pure-native events (see §1 settings gating).
+pure-native events (see §1 settings gating). The importer recognizes
+box-office export headers as-is (Last/First Name joined, Barcode → dedup id,
+Discounts → coupon parsing) and staging opens with **"Where do these land?"**:
+one row per distinct ticket-type label (with counts) → Area picker (bare
+pools first, single-night copies grouped, "Not admission" option) · optional
+Face value · "Every night" checkbox (multi-day) — answers saved to
+`sale_type_mappings` so next month's upload maps itself — plus the
+file-level day selector ("a day inside a ticket name always wins").
+Save-mappings-then-import is one button.
 
 **The Promote group** (2026-09-05 redesign; `SalesReferralsTab.jsx` is dead):
 - **Promos** — org creates SELF promo discount codes (EarlyBird etc.), no
@@ -211,18 +335,21 @@ pure-native events (see §1 settings gating).
   individual sales; a muted expandable "No promo code" row holds organic
   sales. Sales-platform panel below (settings-gated).
 - **Referral setup** — add referral people from scratch (quick-add auto-emails
-  their portal link, best-effort — the deal survives a dead SMTP), per-code
-  deal machinery (reward type/value, points rates, redemption options, bonus
-  overrides), plus the event-wide Redemption tiers and Default bonus tiers
-  panels. Same-email quick-add resolves to the existing person; "Add code"
-  attaches more deals to one profile.
+  their portal link, best-effort — the deal survives a dead SMTP; the email
+  now ends with the payout-terms disclosure + `/terms/referral` link),
+  per-code deal machinery (reward type/value, points rates, redemption
+  options, bonus overrides), plus the event-wide Redemption tiers and Default
+  bonus tiers panels. Same-email quick-add resolves to the existing person;
+  "Add code" attaches more deals to one profile.
 - **Referral payouts** — per referrer/per code: tickets, $, reward accrued in
   the deal's own unit (unspent points shown), volume bonuses crossed, cash
   payout queue with mark-paid. Deliberately NO net-owed column (points/ticket
   rewards don't net into dollars — deferred to the Stripe Connect era).
 
 **The referrer portal** (`/referrer/<token>`, public): two tabs.
-- *Your progress*: one card per code opening with the payout agreement in a
+- *Your progress*: the payout-terms disclosure line (current-effective-terms,
+  future-may-differ, this-page-is-where, bonuses-final, net-of-refunds, full
+  terms link) above one card per code opening with the payout agreement in a
   bold sentence in the deal's own unit ("You earn $2 per ticket sold" / "15%
   of each sale" / points rate table), effective bonus tiers beneath, then
   tickets sold · $ sold · link clicks · estimated payout, and at the bottom
@@ -230,12 +357,19 @@ pure-native events (see §1 settings gating).
 - *Refer people*: name/email rows, code picker when holding several, editable
   Subject (≤150) and Message (≤2000) prefilled from the code's
   `referral_message_draft` (organizer's draft = the template referrers start
-  from — good drafts get sent nearly untouched). The tracked link, discount
-  line, and "sent through EventNXT on behalf of" footer are appended
-  SERVER-SIDE no matter what — referrers customize the words, never the
-  mechanism; caps are anti-abuse (referrer text rides the platform's SMTP).
-  Tracked emails link `/e/<slug>?ref=CODE&r=token`; idempotent re-sends reuse
-  the token; requires a published event page.
+  from — good drafts get sent nearly untouched). First send is gated by the
+  Outreach Policy box (checkbox + link; Send disabled until ticked; collapses
+  to "accepted {date}" after). The tracked link, discount line, and "sent
+  through EventNXT on behalf of" footer are appended SERVER-SIDE no matter
+  what — referrers customize the words, never the mechanism; caps are
+  anti-abuse (referrer text rides the platform's SMTP). Tracked emails link
+  `/e/<slug>?ref=CODE&r=token`; idempotent re-sends reuse the token; requires
+  a published event page.
+
+**Public terms pages** (static, no auth, no fetch — can never fail to load):
+`/terms/purchase` (buyer agreement) and `/terms/referral` (referral payout
+terms + outreach policy). Each is THE single canonical copy of its document;
+attorney edits go there; both carry the same support-address placeholder.
 
 **The public event page** is TWO URL-addressable views served by one component
 (so `?ref`/`?r` capture works wherever a buyer lands): `/e/<slug>` = About
@@ -270,7 +404,7 @@ favor of UTM.
 
 ## 4. Verification harness (the actual safety net)
 
-**Backend**: 30 standalone suites in `test/` — run each with
+**Backend**: 32 standalone suites in `test/` — run each with
 `python3 test/test_X.py` with `DATABASE_URL` set. Local Postgres 16 lives at
 `/tmp/pgdata`, port 5433, socket `/tmp`, db `eventnxt_test`; it dies between
 container sessions — restart:
@@ -284,6 +418,18 @@ triggers immediate shutdown. Postgres also dies BETWEEN bash commands
 constantly in the container — restart before regressions, and wrap one-off
 runs with a restart fallback.
 
+External-events suites (2026-09-06): `test_external_rooms` (pool fan-out
+naming/structure/holds-not-copied/idempotency/refusals + the pool-name-family
+day routing with ZERO ticket types + lone-pool shared-room behavior),
+`test_import_matching` (mapping endpoints, coupon parse → attribution,
+face-value amount fill → percentage reward, day-token-beats-file-day, drink
+coupons out of room math, barcode dedup, per-night summary heads, legacy
+normalized-name fallback, the pool-level-optimism pin, and 0050 package rows
+counting into every night of a family and never into other families).
+`test_outreach` additionally pins the 0051 gate: refer without acceptance →
+400 naming the policy, nothing sent; acceptance stamped once and COMMITTED
+(survives a same-request failure like unpublished-event).
+
 Connect-era suites: `test_connect` (account lifecycle + webhook
 idempotency + fail-closed), `test_destination_charges` (routing, the
 gate, fee+reserve param, refund flags, sub-dollar fee cap against the
@@ -292,40 +438,49 @@ gating/idempotency key + used-vs-released accounting), `test_earnings`
 (money-state sums), `test_purchase_terms` (agreement enforcement +
 consent storage/exposure). Fakes in these suites are uuid-suffixed —
 fixed fake session/acct ids collide with rows previous runs left behind
-(unique constraints are the referee here too).
+(unique constraints are the referee here too — this bit AGAIN on
+2026-09-06 in test_import_matching: fixed fake transaction ids + a
+non-event-scoped query read a previous run's row; event-scope every
+cross-run-able assertion).
 
 Promote-era suites: `test_self_promos` (0042 self-promo guards),
 `test_referral_setup` (referrer fencing, same-email identity, portal payload,
 portal==promo-stats agreement), `test_outreach` (THE attribution policy +
-custom subject/message + payout-agreement payload). Long-standing anchors:
-`test_placement`, `test_portal`, `test_comp_inventory`,
-`test_allotment_seating`, `test_section_summary`, `test_type_defaults`.
+custom subject/message + payout-agreement payload + the 0051 gate).
+Long-standing anchors: `test_placement`, `test_portal`,
+`test_comp_inventory`, `test_allotment_seating`, `test_section_summary`,
+`test_type_defaults`, `test_compday`, `test_capacity_drift`.
 
 **Frontend**: `crash_hunt.cjs` — jsdom mounts the REAL Dashboard over baked
 fixtures and walks all 13 tabs (fixtures describe a PURE-NATIVE event, so the
 settings-gated hidden states are exercised and the muted redirect lines are
 pinned as needles); console errors fail the run. Run:
-`npx vite build && node crash_hunt.cjs`. The repo copy was found BROKEN at
-HEAD this session (a repaired 09-02 copy never got pasted) — the repaired +
-extended version was re-delivered 2026-09-05 and MUST be pasted.
-`multiday_smoke.cjs` (per-day rendering smoke) was built in a prior session,
-never committed, and its only copy died with that session's workspace — it
-needs a fresh rebuild against current code (standing offer).
+`npx vite build && node crash_hunt.cjs`. STATUS RESOLVED 2026-09-06: the repo
+copy at HEAD was verified WORKING (the repaired 09-05 copy did get pasted
+after all — that worry is retired). `multiday_smoke.cjs` is still LOST and
+still needs a fresh rebuild against current code (standing offer). Note the
+fixtures never exercise the NON-NATIVE branches — external-mode behavior was
+probe-verified per slice; an external-fixture crash_hunt pass is a candidate
+future addition.
 
-**The probe pattern — now a HOUSE RULE for public-page changes:** before
+**The probe pattern — a HOUSE RULE for public-page changes:** before
 packaging any change to `PublicEventPage`/`PublicRSVPPage`/portal pages,
 esbuild-bundle the single component into jsdom under a MemoryRouter with a
 fetch mock and assert the changed behavior. Probes are throwaway (deleted
 after use); only behaviors worth keeping get pinned into permanent harnesses.
-This pattern caught three REAL bugs in one day that `vite build` passed:
-undefined vars from a silently-no-matching edit, a Rules-of-Hooks violation
-below early returns, and a duplicated legacy block. Write probes FRESH — a
-probe patched by stacked string-replaces inherits the same silent-no-match
-failure class it exists to catch.
+Write probes FRESH. Probe-environment bug classes catalogued 2026-09-06
+(reproduce before explaining — all three were the probe, not the app):
+captured DOM nodes go stale across React re-renders (re-query live at call
+time); `tr.textContent` includes every `<option>` label, so text-matching a
+row can match the dropdown's own options (match on the label CELL);
+controlled checkboxes need a CLICK, not a value-set + change event.
 
 **The pinning convention**: every accepted behavior gets a permanent check the
 same day it ships. When behavior deliberately changes, the pin is REWRITTEN to
-the new contract, never deleted.
+the new contract, never deleted. Corollary learned 2026-09-06: pin what IS,
+not what you assumed — a planned pin ("pool-level placement blocks past
+imported heads") turned out to contradict a documented deliberate design;
+the pin was rewritten to state the optimism explicitly.
 
 ---
 
@@ -341,7 +496,14 @@ lines between statements that a compact pattern won't match, and `.replace`
 doesn't complain — uses can land while definitions don't, and the BUILD STILL
 PASSES (the crash waits for render). Verify every edit actually landed (grep
 the symbol after), and prefer exact-text edits taken from a fresh view of the
-file.
+file. 2026-09-06 additions to the same family: scripted region-replacement
+by index left a dangling fragment (the import check caught it — always
+import/build immediately after scripted edits); a heredoc quoting collision
+killed a whole edit script BEFORE it wrote (verify per-edit with asserts, and
+know that assert-then-write-at-end means a thrown assert leaves the file
+untouched); and anchoring a schema field on a line that exists in TWO Pydantic
+classes put it in the wrong one — the response serializer silently DROPPED the
+unknown field (key absent, not null; grep which class actually got it).
 
 **Hooks live above early returns.** A `useEffect` planted below a component's
 loading early-returns changes hook order between renders — invisible to the
@@ -350,18 +512,27 @@ hooks go at the top with their siblings, self-contained on raw state.
 
 **Reproduce before explaining.** Every "it doesn't work" has a mechanism
 findable in one repro — and the repro also distinguishes app bugs from
-probe-environment bugs (twice the "failure" was the probe).
+probe-environment bugs (now FIVE times the "failure" was the probe).
 
 **Display must equal enforcement, structurally.** Numbers shown and numbers
 enforced come from the same function, never parallel math
 (`availability_for`, `section_room_for_comps`, `sale_aggregates_by_code`,
-`effective_bonus_tiers`). Parallel math WILL drift.
+`effective_bonus_tiers`, `imported_heads_for_pool`). Parallel math WILL
+drift. Extension (0049): when a MATCH can be computed once and stamped,
+stamp it — re-running name-guessing inside every query is parallel math in
+time.
 
 **Intent needs its own column.** When a value can be written by both
 automation and a human choice, the choice gets a dedicated field (0041).
 
 **Modes that can be derived from data shouldn't exist.** Chooser-ness falls
 out of the numbers; every mode removed is a class of stale combinations gone.
+Corollary (0050): "room spaces" vs "tables" is vocabulary, not structure —
+one grain, two labels.
+
+**Acceptance is its own fact.** A terms/consent stamp must COMMIT at the
+gate, not flush — otherwise a later failure in the same request silently
+un-accepts what the user accepted (found live in the 0051 outreach gate).
 
 **Emails go through the module** (`email_service.send_email`), never a
 direct import of the function — monkeypatching and provider swaps depend on
@@ -417,17 +588,29 @@ grep.
   refund-cost reserve (release = sum over still-paid orders).
 - **0048** `orders.terms_accepted_at` + `marketing_opt_in` — purchasing
   agreement enforcement + §7 marketing consent.
+- **0049** `sales.seating_category_id`/`event_day`/`is_admission` (SET NULL
+  on pool delete — sales outlive rooms) + `sale_type_mappings` table — the
+  import match, stamped once, mapped once.
+- **0050** `sales.all_days` + `sale_type_mappings.all_days` — weekend
+  packages counting into every night of a pool's name family.
+- **0051** `guests.outreach_terms_accepted_at` — the Outreach Policy gate
+  on `/refer` (committed at the gate).
 
 ---
 
-## 7. Demolition ledger (inventory run 2026-09-05)
+## 7. Demolition ledger (updated 2026-09-06)
 
-- **DELETED / delete-now**: `TicketsTab.jsx` (confirmed gone at HEAD),
-  `SalesReferralsTab.jsx` (dissolved into the four Promote pages — delete the
-  file in GitHub if not already done), `api.updateSeatingCategory` (zero
-  references; removed from `api.js`).
+- **DELETED this session**: both exact-`ilike` imported-sales matching sites
+  (services/seating.py + routers/seating_categories.py — replaced by the one
+  `imported_heads_for_pool`; the router's dead `Sale` import went with them);
+  the native seats/sections expander JSX duplicates in `TicketsSeatingTab`
+  (extracted into shared render helpers serving both lists) and the
+  now-unused `applySeats` wrapper; the GA-only comp quick-form for
+  NON-NATIVE events (replaced by the full room builder — it remains for
+  native events as the press-row/holds panel).
 - **NEEDS-MIGRATION-FIRST — the `select` mode kill (spec'd, awaiting go)**:
-  migration 0049+ (renumbered thrice: 0045→0047→0048 got used) converts `guest_mode='select'` → `'invite'`; then delete the
+  migration **0052+** (renumbered a FOURTH time: 0045→0047→0048→0049-0051
+  got used) converts `guest_mode='select'` → `'invite'`; then delete the
   mode from `comp_tickets.py` (GUEST_MODES + ~5 branches), the
   `schemas/guest.py` literals, the RSVP chooser fallback
   (`schemas/rsvp.py` + `PublicRSVPPage.jsx` line ~54), and the legacy option
@@ -437,8 +620,10 @@ grep.
 - **LOAD-BEARING, deliberately kept**: the shape-derivation paths (dead only
   once every legacy guest type is re-saved in the unified editor — a one-time
   re-save sweep script would force the trigger); the `tickets`→`partySize`
-  importer alias (reclassified: it's the alias table doing its job — deleting
-  it breaks old organizer CSVs for one line of savings).
+  importer alias (it's the alias table doing its job — and 0049's
+  `sale_type_mappings` is the same pattern promoted to a real table);
+  pool-level placement optimism (documented design, see §2 — changing it is
+  a policy decision, not cleanup).
 
 ---
 
@@ -446,13 +631,31 @@ grep.
 
 - **FashioNXT dry run** on the deployed app with real casting data —
   STRONGEST recommendation before any new feature work; it now
-  rehearses the ENTIRE money path (connect → sell → refund → release)
-  plus PDFs (`requirements.txt` must be deployed for the PDF deps).
+  rehearses the ENTIRE money path (connect → sell → refund → release),
+  PDFs (`requirements.txt` must be deployed for the PDF deps), AND the
+  external path (build the Ticket Tomato-mirroring room, fan out days,
+  import a real export, watch per-night reconciliation + referral
+  attribution).
+- **Real Ticket Tomato export verification** — the importer was built
+  against the dashboard's known shape (screenshot-verified columns);
+  first real file may need one header alias at most. Confirm whether
+  the export carries a check-in column (future: reconcile external
+  check-ins into Guest list).
+- **Pool-level comp enforcement policy** (from §2): should external
+  events hard-refuse comp placement past imported heads at pool level?
+  One deliberate line, but it would tighten native identically. Awaiting
+  Joshua's call.
+- **Packages pre-declare panel** (optional polish, declined-for-now):
+  list all-days mappings in Seats Setup before any import
+  ("Weekend Pass → rides Row 2 Preferred, every night, sold: N") — same
+  table, display + pre-declare only.
+- **Attorney review of `/terms/referral`** (placeholder copy) alongside
+  the purchasing agreement; BOTH terms pages share the §10 support-address
+  placeholder — paste the real address in both when it exists.
 - **Sandbox eyes-on money check** (load-bearing, still owed): refund one
   reserved order and verify the three balances — buyer +100%,
   organizer's balance down exactly their transfer, platform balance
-  UNCHANGED by the refund. That single observation validates the refund
-  flag arithmetic the reserve design derives from docs.
+  UNCHANGED by the refund.
 - **Consent follow-ups (offered, unbuilt)**: an "emails with marketing
   consent" export/filter on Orders; RSVP-page opt-in stored on guests +
   Guest-list tag (comp people are never asked today).
@@ -465,22 +668,32 @@ grep.
 - **Stripe Tax** — parked until the first event in a taxing state
   (Oregon home base = no sales tax); agreement's tax clause + a CPA
   hour at that milestone.
-- **Support email** — §10 of the purchasing agreement (docx AND
-  `PurchaseTermsPage.jsx`) carries a placeholder ending; paste the real
-  address when it exists.
-- **`select`-mode kill** — spec above (§7), needs Joshua's explicit go.
-- **Rebuild `multiday_smoke.cjs`** against current code (original lost).
+- **`select`-mode kill** — spec above (§7), now 0052+, needs Joshua's
+  explicit go.
+- **Rebuild `multiday_smoke.cjs`** against current code (original lost);
+  an external-fixture crash_hunt pass is a related candidate.
 - **Comp minting for type-less pools** — never explicitly verified;
   check before relying on it for FashioNXT's press rows.
+- **Per-seat import fidelity** — Ticket Tomato's lounge rows carry
+  Table/Seat numbers; a future slice could mark externally-sold seats
+  seat-by-seat (today: pool-level truth, seat grid = comp instrument).
 - **Role-gated sidebar** — blocked on Tito's Events360 role values.
-- **Add-ons page** — needs a design conversation; no backend exists.
+- **Add-ons page** — needs a design conversation; no backend exists
+  (drink-coupon import labels preview the space).
 - **Seat-adjacency automation**; "Unsectioned" row on Seating summary;
   the silent-email logging patch (nice-to-haves / revisit on demand).
-- **Eyes-on-deploy queue**: checkout agree/marketing checkbox spacing on
-  mobile, `/terms/purchase` page once, a fresh order showing the
-  "✓ marketing OK" tag, Earnings/reserve strip wrapping on mobile,
-  tickets tab on the real FashioNXT event (mixed-span chips), referrer
-  portal on mobile.
+- **Eyes-on-deploy queue**: external room builder on a real event (one GA
+  + one assigned-row area; reserve two seats; fan out a multi-day area
+  and check the chips); "Room spaces" wording end-to-end incl. the
+  native "Whole space" sold-by note; a real export through staging
+  (mapping panel on mobile too) then a re-upload watching dupes skip; a
+  fake weekend-pass row moving all nights' Sold at once; `/terms/referral`
+  once; one referrer through first-send acceptance on mobile; the
+  portal-link email's payout block in a real inbox; plus the standing
+  items: checkout agree/marketing spacing on mobile, `/terms/purchase`,
+  a fresh order's "✓ marketing OK" tag, Earnings/reserve strip wrapping
+  on mobile, tickets tab on the real FashioNXT event, referrer portal on
+  mobile.
 
 ---
 
@@ -516,10 +729,11 @@ grep.
 ## 9. Working agreements (how we build)
 
 Baby steps: agree scope → build one slice with throwaway verification probes
-(MANDATORY for public-page changes — §4) → full regression (all 25 suites +
+(MANDATORY for public-page changes — §4) → full regression (all 32 suites +
 `crash_hunt`) → package COMPLETE files with the repo path as a first-line
-comment and line counts stated, mirroring the folder structure in outputs.
-Backend before frontend, always. Plain-language summaries of what changed and
-why, honest confessions when a wobble happened mid-slice, and one operational
-note when a change has a sharp edge. Every accepted behavior pinned the day
-it ships.
+comment AND encoded in the filename
+(`repo__folder__folder__file.ext`), line counts stated. Backend before
+frontend, always. Plain-language summaries of what changed and why, honest
+confessions when a wobble happened mid-slice, and one operational note when a
+change has a sharp edge. Every accepted behavior pinned the day it ships —
+and pins state what IS, including deliberate optimism.
