@@ -26,7 +26,7 @@ from app.models.event_settings import (
 from app.models.ticket_type import TicketType
 from app.schemas.event_settings import EventSettingsResponse, EventSettingsUpdateRequest
 from app.services.deps import CurrentUser
-from app.services.event_access import require_event_access
+from app.services.permissions import require_setup
 
 router = APIRouter(tags=["event-settings"])
 
@@ -110,7 +110,7 @@ def _get_or_create(db: Session, event_id: str) -> EventSettings:
 def get_settings(
     event_id: str,
     db: Session = Depends(get_db),
-    user: CurrentUser = Depends(require_event_access),
+    user: CurrentUser = Depends(require_setup),
 ):
     settings = _get_or_create(db, event_id)
     if _sync_days_from_events360(settings, user):
@@ -124,7 +124,7 @@ def update_settings(
     event_id: str,
     payload: EventSettingsUpdateRequest,
     db: Session = Depends(get_db),
-    user: CurrentUser = Depends(require_event_access),
+    user: CurrentUser = Depends(require_setup),
 ):
     allowed = {
         "ticketing_mode": TICKETING_MODES,

@@ -1,3 +1,4 @@
+# eventnxt-backend: app/services/deps.py
 import httpx
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
@@ -20,6 +21,9 @@ class CurrentUser:
         self.name = data["name"]
         self.email = data["email"]
         self.role = data["role"]
+        # Effective grants from Events360 (may be absent on a pre-bridge
+        # Events360 — services.permissions treats that as all-access).
+        self.permissions = data.get("permissions")
         self.raw_token = raw_token  # forwarded to other Events360 endpoints, e.g. /oauth/events/{id}
 
 

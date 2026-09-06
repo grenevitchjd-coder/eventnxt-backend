@@ -30,7 +30,7 @@ from app.models.order_item import OrderItem
 from app.models.seat import Seat
 from app.models.ticket import Ticket, TicketStatus
 from app.services.deps import CurrentUser
-from app.services.event_access import require_event_access
+from app.services.permissions import require_checkin
 
 router = APIRouter(prefix="/events/{event_id}/check-in", tags=["check-in"])
 
@@ -114,7 +114,7 @@ def check_in(
     code: str,
     day: Optional[str] = None,
     db: Session = Depends(get_db),
-    user: CurrentUser = Depends(require_event_access),
+    user: CurrentUser = Depends(require_checkin),
 ):
     """`day` is the door's local date (the scanner sends it); when
     absent we fall back to the server's UTC date. Undated tickets —
@@ -147,7 +147,7 @@ def check_in(
 def check_in_stats(
     event_id: str,
     db: Session = Depends(get_db),
-    user: CurrentUser = Depends(require_event_access),
+    user: CurrentUser = Depends(require_checkin),
 ):
     total_valid = (
         db.query(Ticket).filter(Ticket.event_id == event_id, Ticket.status == TicketStatus.VALID).count()

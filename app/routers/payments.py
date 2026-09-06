@@ -49,7 +49,7 @@ from app.schemas.payments import (
 )
 from app.services import stripe_gateway as gateway
 from app.services.deps import CurrentUser
-from app.services.event_access import require_event_access
+from app.services.permissions import require_money
 
 router = APIRouter(tags=["payments"])
 logger = logging.getLogger("eventnxt.payments")
@@ -76,7 +76,7 @@ def _org_account(db: Session, organization_id) -> PaymentAccount | None:
 @router.get("/events/{event_id}/payments", response_model=PaymentAccountStatus)
 def payment_status(
     event_id: str,
-    user: CurrentUser = Depends(require_event_access),
+    user: CurrentUser = Depends(require_money),
     db: Session = Depends(get_db),
 ):
     account = _org_account(db, user.organization_id)
@@ -95,7 +95,7 @@ def payment_status(
 @router.post("/events/{event_id}/payments/connect", response_model=PaymentLinkResponse)
 def connect_payments(
     event_id: str,
-    user: CurrentUser = Depends(require_event_access),
+    user: CurrentUser = Depends(require_money),
     db: Session = Depends(get_db),
 ):
     """
@@ -143,7 +143,7 @@ def connect_payments(
 @router.post("/events/{event_id}/payments/manage-link", response_model=PaymentLinkResponse)
 def manage_payments_link(
     event_id: str,
-    user: CurrentUser = Depends(require_event_access),
+    user: CurrentUser = Depends(require_money),
     db: Session = Depends(get_db),
 ):
     """
@@ -166,7 +166,7 @@ def manage_payments_link(
 @router.get("/events/{event_id}/payments/earnings", response_model=EarningsResponse)
 def event_earnings(
     event_id: str,
-    user: CurrentUser = Depends(require_event_access),
+    user: CurrentUser = Depends(require_money),
     db: Session = Depends(get_db),
 ):
     """
@@ -245,7 +245,7 @@ def _event_over(user: CurrentUser) -> bool:
 @router.post("/events/{event_id}/payments/release-reserve", response_model=ReserveReleaseResponse)
 def release_reserve(
     event_id: str,
-    user: CurrentUser = Depends(require_event_access),
+    user: CurrentUser = Depends(require_money),
     db: Session = Depends(get_db),
 ):
     """
@@ -308,7 +308,7 @@ def release_reserve(
 @router.get("/events/{event_id}/payments/payouts", response_model=PayoutsResponse)
 def payout_summary(
     event_id: str,
-    user: CurrentUser = Depends(require_event_access),
+    user: CurrentUser = Depends(require_money),
     db: Session = Depends(get_db),
 ):
     """

@@ -1,3 +1,4 @@
+# eventnxt-backend: app/routers/me.py
 from fastapi import APIRouter, Depends
 
 from app.services.deps import get_current_user, CurrentUser
@@ -17,4 +18,7 @@ def me(user: CurrentUser = Depends(get_current_user)):
         "name": user.name,
         "email": user.email,
         "role": user.role,
+        # Drives the role-gated sidebar; same payload the backend enforces
+        # with (see services/permissions.py).
+        "permissions": user.permissions,
     }

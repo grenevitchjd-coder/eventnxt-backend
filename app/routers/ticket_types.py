@@ -1,3 +1,4 @@
+# eventnxt-backend: app/routers/ticket_types.py
 """eventnxt-backend: app/routers/ticket_types.py"""
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -15,7 +16,7 @@ from app.models.zone_section import ZoneSection
 from app.services import seats as seats_service
 from app.schemas.ticketing import TicketTypeAdminResponse, TicketTypeCreateOrUpdateRequest
 from app.services.deps import CurrentUser
-from app.services.event_access import require_event_access
+from app.services.permissions import require_setup
 from app.services.comp_tickets import event_days_for, get_event_settings_row
 from app.services.seating import name_family_filter, normalized_name
 from app.services.ticketing import availability_for
@@ -43,7 +44,7 @@ def _with_counts(db: Session, ticket_types: list[TicketType]) -> list[TicketType
 
 @router.get("/events/{event_id}/ticket-types", response_model=list[TicketTypeAdminResponse])
 def list_ticket_types(
-    event_id: str, db: Session = Depends(get_db), user: CurrentUser = Depends(require_event_access)
+    event_id: str, db: Session = Depends(get_db), user: CurrentUser = Depends(require_setup)
 ):
     ticket_types = (
         db.query(TicketType)
@@ -85,7 +86,7 @@ def create_ticket_type(
     event_id: str,
     payload: TicketTypeCreateOrUpdateRequest,
     db: Session = Depends(get_db),
-    user: CurrentUser = Depends(require_event_access),
+    user: CurrentUser = Depends(require_setup),
 ):
     valid_date = _validate_type_date(db, event_id, payload.valid_date)
     ticket_type = TicketType(
@@ -119,7 +120,7 @@ def update_ticket_type(
     ticket_type_id: str,
     payload: TicketTypeCreateOrUpdateRequest,
     db: Session = Depends(get_db),
-    user: CurrentUser = Depends(require_event_access),
+    user: CurrentUser = Depends(require_setup),
 ):
     ticket_type = (
         db.query(TicketType)
@@ -186,7 +187,7 @@ def delete_ticket_type(
     event_id: str,
     ticket_type_id: str,
     db: Session = Depends(get_db),
-    user: CurrentUser = Depends(require_event_access),
+    user: CurrentUser = Depends(require_setup),
 ):
     ticket_type = (
         db.query(TicketType)
@@ -214,7 +215,7 @@ def fan_out_ticket_type(
     event_id: str,
     ticket_type_id: str,
     db: Session = Depends(get_db),
-    user: CurrentUser = Depends(require_event_access),
+    user: CurrentUser = Depends(require_setup),
 ):
     """
     "Same every day": clone a DATED template type to every event day
@@ -372,7 +373,7 @@ def create_pass_from_type(
     ticket_type_id: str,
     payload: PassCreateRequest,
     db: Session = Depends(get_db),
-    user: CurrentUser = Depends(require_event_access),
+    user: CurrentUser = Depends(require_setup),
 ):
     """
     Derived all-days pass: a whole-event type linked to every night of a
@@ -429,7 +430,7 @@ def convert_type_to_pass(
     ticket_type_id: str,
     payload: ConvertToPassRequest,
     db: Session = Depends(get_db),
-    user: CurrentUser = Depends(require_event_access),
+    user: CurrentUser = Depends(require_setup),
 ):
     """
     Retro-fit for "the all-days package was made first": take a

@@ -1,3 +1,4 @@
+# eventnxt-backend: app/routers/orders_admin.py
 """
 eventnxt-backend: app/routers/orders_admin.py
 
@@ -35,7 +36,7 @@ from app.models.ticket import Ticket, TicketStatus
 from app.schemas.ticketing import AdminOrderResponse, AdminOrderItem
 from app.services.deps import CurrentUser
 from app.services.email import EmailNotConfigured, EmailSendError, send_email
-from app.services.event_access import require_event_access
+from app.services.permissions import require_money
 from app.services.stripe_gateway import create_refund
 
 router = APIRouter(tags=["orders-admin"])
@@ -72,7 +73,7 @@ def list_orders(
     event_id: str,
     search: str = "",
     db: Session = Depends(get_db),
-    user: CurrentUser = Depends(require_event_access),
+    user: CurrentUser = Depends(require_money),
 ):
     q = db.query(Order).filter(Order.event_id == event_id)
     term = search.strip()
@@ -99,7 +100,7 @@ def refund_order(
     event_id: str,
     order_id: str,
     db: Session = Depends(get_db),
-    user: CurrentUser = Depends(require_event_access),
+    user: CurrentUser = Depends(require_money),
 ):
     order = (
         db.query(Order)

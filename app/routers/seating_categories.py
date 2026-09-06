@@ -27,7 +27,7 @@ from app.schemas.seating_category import (
 from app.services import sales as sales_service
 from app.services import seats as seats_service
 from app.services.deps import CurrentUser
-from app.services.event_access import require_event_access
+from app.services.permissions import require_setup
 
 router = APIRouter(prefix="/events/{event_id}/seating-categories", tags=["seating-categories"])
 
@@ -37,7 +37,7 @@ def create_seating_category(
     event_id: str,
     payload: SeatingCategoryCreateRequest,
     db: Session = Depends(get_db),
-    user: CurrentUser = Depends(require_event_access),
+    user: CurrentUser = Depends(require_setup),
 ):
     category = SeatingCategory(
         event_id=event_id,
@@ -61,7 +61,7 @@ def create_seating_category(
 def list_seating_categories(
     event_id: str,
     db: Session = Depends(get_db),
-    user: CurrentUser = Depends(require_event_access),
+    user: CurrentUser = Depends(require_setup),
 ):
     cats = db.query(SeatingCategory).filter(SeatingCategory.event_id == event_id).order_by(SeatingCategory.created_at).all()
     secs = (
@@ -89,7 +89,7 @@ def update_seating_category(
     category_id: str,
     payload: SeatingCategoryUpdateRequest,
     db: Session = Depends(get_db),
-    user: CurrentUser = Depends(require_event_access),
+    user: CurrentUser = Depends(require_setup),
 ):
     category = (
         db.query(SeatingCategory)
@@ -139,7 +139,7 @@ def replace_zone_sections(
     category_id: str,
     payload: ZoneSectionsReplaceRequest,
     db: Session = Depends(get_db),
-    user: CurrentUser = Depends(require_event_access),
+    user: CurrentUser = Depends(require_setup),
 ):
     """
     Replace the pool's member sections wholesale (the composer sends the
@@ -210,7 +210,7 @@ def fan_out_seating_category(
     event_id: str,
     category_id: str,
     db: Session = Depends(get_db),
-    user: CurrentUser = Depends(require_event_access),
+    user: CurrentUser = Depends(require_setup),
 ):
     """
     "Same room every day" for events with NO ticket types (external
@@ -337,7 +337,7 @@ def list_pool_seats(
     event_id: str,
     category_id: str,
     db: Session = Depends(get_db),
-    user: CurrentUser = Depends(require_event_access),
+    user: CurrentUser = Depends(require_setup),
 ):
     """The organizer's seat view: every seat with its derived status
     (available / sold / held / reserved) plus the reservation label.
@@ -352,7 +352,7 @@ def block_pool_seats(
     category_id: str,
     payload: SeatBlockRequest,
     db: Session = Depends(get_db),
-    user: CurrentUser = Depends(require_event_access),
+    user: CurrentUser = Depends(require_setup),
 ):
     """Reserve seats with an optional label ("Press"). Refuses seats a
     buyer already owns or holds; races with checkout are settled under
@@ -370,7 +370,7 @@ def unblock_pool_seats(
     category_id: str,
     payload: SeatUnblockRequest,
     db: Session = Depends(get_db),
-    user: CurrentUser = Depends(require_event_access),
+    user: CurrentUser = Depends(require_setup),
 ):
     """Release organizer holds — the seats go straight back on sale."""
     category = _pool_or_404(db, event_id, category_id)
@@ -384,7 +384,7 @@ def delete_seating_category(
     event_id: str,
     category_id: str,
     db: Session = Depends(get_db),
-    user: CurrentUser = Depends(require_event_access),
+    user: CurrentUser = Depends(require_setup),
 ):
     category = (
         db.query(SeatingCategory)
@@ -411,7 +411,7 @@ def delete_seating_category(
 def get_seating_summary(
     event_id: str,
     db: Session = Depends(get_db),
-    user: CurrentUser = Depends(require_event_access),
+    user: CurrentUser = Depends(require_setup),
 ):
     """
     One row per seating category, reconciling capacity against the guest
@@ -491,7 +491,7 @@ def get_seating_summary(
 def get_section_summary(
     event_id: str,
     db: Session = Depends(get_db),
-    user: CurrentUser = Depends(require_event_access),
+    user: CurrentUser = Depends(require_setup),
 ):
     """
     The pool summary decomposed one level: every pool with a row per
@@ -524,7 +524,7 @@ def get_section_summary(
 def labeled_seat_holds(
     event_id: str,
     db: Session = Depends(get_db),
-    user: CurrentUser = Depends(require_event_access),
+    user: CurrentUser = Depends(require_setup),
 ):
     """
     Every LABELED reserved-seat hold in the event, grouped — so the

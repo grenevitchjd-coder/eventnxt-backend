@@ -28,7 +28,7 @@ from app.schemas.guest_ticket_request import GuestTicketRequestResponse
 from app.services import comp_tickets, seating
 from app.services import seats as seats_service
 from app.services.deps import CurrentUser
-from app.services.event_access import require_event_access
+from app.services.permissions import require_guest_list, require_guests, require_guests_or_guest_list
 
 router = APIRouter(prefix="/events/{event_id}/guests", tags=["guests"])
 
@@ -111,7 +111,7 @@ def create_guest(
     event_id: str,
     payload: GuestCreateRequest,
     db: Session = Depends(get_db),
-    user: CurrentUser = Depends(require_event_access),
+    user: CurrentUser = Depends(require_guests),
 ):
     guest_type = db.query(GuestType).filter(GuestType.id == payload.guest_type_id).first()
     if not guest_type or str(guest_type.event_id) != event_id:
@@ -220,7 +220,7 @@ def create_guest(
 def list_guests(
     event_id: str,
     db: Session = Depends(get_db),
-    user: CurrentUser = Depends(require_event_access),
+    user: CurrentUser = Depends(require_guests_or_guest_list),
 ):
     guests = db.query(Guest).filter(Guest.event_id == event_id).all()
     return [_serialize_guest(db, g) for g in guests]
@@ -232,7 +232,7 @@ def update_guest(
     guest_id: str,
     payload: GuestUpdateRequest,
     db: Session = Depends(get_db),
-    user: CurrentUser = Depends(require_event_access),
+    user: CurrentUser = Depends(require_guests_or_guest_list),
 ):
     """
     Editing always takes an explicit seating_category_id (or null) — no
@@ -314,7 +314,7 @@ def set_guest_seats(
     guest_id: str,
     payload: GuestSeatsAssignRequest,
     db: Session = Depends(get_db),
-    user: CurrentUser = Depends(require_event_access),
+    user: CurrentUser = Depends(require_guests),
 ):
     """
     Wholesale-replace this guest's assigned seats (Slice B of reserved
@@ -345,7 +345,7 @@ def set_guest_sent_status(
     guest_id: str,
     payload: GuestSentStatusRequest,
     db: Session = Depends(get_db),
-    user: CurrentUser = Depends(require_event_access),
+    user: CurrentUser = Depends(require_guests),
 ):
     """
     Manually flip one of the organizer's record-keeping markers:
@@ -373,7 +373,7 @@ def send_ticket(
     event_id: str,
     guest_id: str,
     db: Session = Depends(get_db),
-    user: CurrentUser = Depends(require_event_access),
+    user: CurrentUser = Depends(require_guests_or_guest_list),
 ):
     """
     The Needs-seating queue's resolve button — and a plain re-send for
@@ -421,7 +421,7 @@ def send_ticket(
 def list_ticket_requests(
     event_id: str,
     db: Session = Depends(get_db),
-    user: CurrentUser = Depends(require_event_access),
+    user: CurrentUser = Depends(require_guests),
 ):
     rows = (
         db.query(GuestTicketRequest, Guest)
@@ -453,7 +453,7 @@ def approve_ticket_request(
     event_id: str,
     request_id: str,
     db: Session = Depends(get_db),
-    user: CurrentUser = Depends(require_event_access),
+    user: CurrentUser = Depends(require_guests),
 ):
     """
     Approve = the guest's party grows by the requested amount. If they're
@@ -518,7 +518,7 @@ def deny_ticket_request(
     event_id: str,
     request_id: str,
     db: Session = Depends(get_db),
-    user: CurrentUser = Depends(require_event_access),
+    user: CurrentUser = Depends(require_guests),
 ):
     row = (
         db.query(GuestTicketRequest, Guest)
@@ -552,7 +552,7 @@ def sync_guest_tickets(
     guest_id: str,
     payload: SyncTicketsRequest,
     db: Session = Depends(get_db),
-    user: CurrentUser = Depends(require_event_access),
+    user: CurrentUser = Depends(require_guests_or_guest_list),
 ):
     """
     Re-true a guest's admission codes to their CURRENT shape, both
@@ -587,7 +587,7 @@ def delete_guest(
     event_id: str,
     guest_id: str,
     db: Session = Depends(get_db),
-    user: CurrentUser = Depends(require_event_access),
+    user: CurrentUser = Depends(require_guests_or_guest_list),
 ):
     """
     Fully remove a guest — including any comp codes already minted for
@@ -643,7 +643,7 @@ def remove_guest_with_notice(
     guest_id: str,
     payload: GuestRemoveRequest,
     db: Session = Depends(get_db),
-    user: CurrentUser = Depends(require_event_access),
+    user: CurrentUser = Depends(require_guests_or_guest_list),
 ):
     """
     The Guest list page's removal: same cleanup as delete_guest, but for
@@ -677,7 +677,7 @@ def remove_guest_with_notice(
 def guest_door_roster(
     event_id: str,
     db: Session = Depends(get_db),
-    user: CurrentUser = Depends(require_event_access),
+    user: CurrentUser = Depends(require_guest_list),
 ):
     """
     The door reference: every guest — direct invitees AND allotment
@@ -747,7 +747,7 @@ def send_guest_invite(
     guest_id: str,
     payload: SendInviteRequest,
     db: Session = Depends(get_db),
-    user: CurrentUser = Depends(require_event_access),
+    user: CurrentUser = Depends(require_guests),
 ):
     """
     Email one direct invitee their RSVP link (offer summary included)
@@ -779,7 +779,7 @@ def send_guest_invites_bulk(
     event_id: str,
     payload: SendInvitesBulkRequest,
     db: Session = Depends(get_db),
-    user: CurrentUser = Depends(require_event_access),
+    user: CurrentUser = Depends(require_guests),
 ):
     """
     "Email all unsent": every direct invitee (never distributors, never
@@ -816,7 +816,7 @@ def send_portal_links_bulk(
     event_id: str,
     payload: SendInvitesBulkRequest,
     db: Session = Depends(get_db),
-    user: CurrentUser = Depends(require_event_access),
+    user: CurrentUser = Depends(require_guests),
 ):
     """
     The Allotments page's commit: email every allotment HOLDER without a

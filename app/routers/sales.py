@@ -1,3 +1,4 @@
+# eventnxt-backend: app/routers/sales.py
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -55,7 +56,7 @@ from app.services import sale_matching
 from app.services import sales as sales_service
 from app.services import email as email_service
 from app.services.deps import CurrentUser
-from app.services.event_access import require_event_access
+from app.services.permissions import require_promotion, require_money
 
 router = APIRouter(prefix="/events/{event_id}", tags=["sales"])
 
@@ -125,7 +126,7 @@ def _validate_reward_fields(reward_type: str, reward_value, points_rates):
 
 @router.get("/sales-config", response_model=SalesConfigResponse)
 def get_sales_config(
-    event_id: str, db: Session = Depends(get_db), user: CurrentUser = Depends(require_event_access)
+    event_id: str, db: Session = Depends(get_db), user: CurrentUser = Depends(require_money)
 ):
     config = db.query(SalesConfig).filter(SalesConfig.event_id == event_id).first()
     platform = config.platform.value if config else SalesPlatform.CUSTOM_CSV.value
@@ -137,7 +138,7 @@ def set_sales_config(
     event_id: str,
     payload: SalesConfigUpdateRequest,
     db: Session = Depends(get_db),
-    user: CurrentUser = Depends(require_event_access),
+    user: CurrentUser = Depends(require_money),
 ):
     config = db.query(SalesConfig).filter(SalesConfig.event_id == event_id).first()
     if config:
@@ -157,7 +158,7 @@ def create_promo_code(
     event_id: str,
     payload: PromoCodeCreateRequest,
     db: Session = Depends(get_db),
-    user: CurrentUser = Depends(require_event_access),
+    user: CurrentUser = Depends(require_promotion),
 ):
     # Two kinds of code (0042): guest_id set = referral code (reward
     # terms required, as always); guest_id None = SELF PROMO — the org's
@@ -212,7 +213,7 @@ def create_promo_code(
 
 @router.get("/promo-codes", response_model=list[PromoCodeResponse])
 def list_promo_codes(
-    event_id: str, db: Session = Depends(get_db), user: CurrentUser = Depends(require_event_access)
+    event_id: str, db: Session = Depends(get_db), user: CurrentUser = Depends(require_promotion)
 ):
     codes = db.query(PromoCode).filter(PromoCode.event_id == event_id).all()
     return [_serialize_promo_code(db, c) for c in codes]
@@ -224,7 +225,7 @@ def update_promo_code(
     code_id: str,
     payload: PromoCodeUpdateRequest,
     db: Session = Depends(get_db),
-    user: CurrentUser = Depends(require_event_access),
+    user: CurrentUser = Depends(require_promotion),
 ):
     code = db.query(PromoCode).filter(PromoCode.id == code_id, PromoCode.event_id == event_id).first()
     if not code:
@@ -272,7 +273,7 @@ def delete_promo_code(
     event_id: str,
     code_id: str,
     db: Session = Depends(get_db),
-    user: CurrentUser = Depends(require_event_access),
+    user: CurrentUser = Depends(require_promotion),
 ):
     code = db.query(PromoCode).filter(PromoCode.id == code_id, PromoCode.event_id == event_id).first()
     if not code:
@@ -314,7 +315,7 @@ def create_referrer(
     event_id: str,
     payload: ReferrerCreateRequest,
     db: Session = Depends(get_db),
-    user: CurrentUser = Depends(require_event_access),
+    user: CurrentUser = Depends(require_promotion),
 ):
     """
     A referral person from scratch — an influencer or salesperson who
@@ -360,7 +361,7 @@ def send_referrer_portal_link(
     guest_id: str,
     payload: SendReferrerPortalLinkRequest,
     db: Session = Depends(get_db),
-    user: CurrentUser = Depends(require_event_access),
+    user: CurrentUser = Depends(require_promotion),
 ):
     """
     Email a referrer their portal link (dashboard + reward claiming) and
@@ -445,12 +446,12 @@ def send_referrer_portal_link(
 
 
 @router.get("/sales", response_model=list[SaleResponse])
-def list_sales(event_id: str, db: Session = Depends(get_db), user: CurrentUser = Depends(require_event_access)):
+def list_sales(event_id: str, db: Session = Depends(get_db), user: CurrentUser = Depends(require_money)):
     return db.query(Sale).filter(Sale.event_id == event_id).order_by(Sale.imported_at.desc()).all()
 
 
 @router.get("/promo-stats", response_model=list[PromoStatRow])
-def promo_stats(event_id: str, db: Session = Depends(get_db), user: CurrentUser = Depends(require_event_access)):
+def promo_stats(event_id: str, db: Session = Depends(get_db), user: CurrentUser = Depends(require_money)):
     """
     Per-code performance for the Promo Tracking and Referral Payouts
     pages: transactions, tickets (SUM of quantity — a bulk row counts
@@ -498,7 +499,7 @@ def promo_stats(event_id: str, db: Session = Depends(get_db), user: CurrentUser 
 
 @router.get("/sales/type-mappings", response_model=list[SaleTypeMappingResponse])
 def list_sale_type_mappings(
-    event_id: str, db: Session = Depends(get_db), user: CurrentUser = Depends(require_event_access)
+    event_id: str, db: Session = Depends(get_db), user: CurrentUser = Depends(require_money)
 ):
     from app.models.sale_type_mapping import SaleTypeMapping
 
@@ -515,7 +516,7 @@ def put_sale_type_mappings(
     event_id: str,
     payload: SaleTypeMappingsPutRequest,
     db: Session = Depends(get_db),
-    user: CurrentUser = Depends(require_event_access),
+    user: CurrentUser = Depends(require_money),
 ):
     """
     Bulk upsert of the organizer's label->area answers from import
@@ -547,7 +548,7 @@ def import_sales(
     event_id: str,
     payload: SalesImportRequest,
     db: Session = Depends(get_db),
-    user: CurrentUser = Depends(require_event_access),
+    user: CurrentUser = Depends(require_money),
 ):
     """
     Reconciles a batch of sales rows (parsed client-side from a CSV/Excel
@@ -625,7 +626,7 @@ def create_redemption_tier(
     event_id: str,
     payload: RedemptionTierCreateRequest,
     db: Session = Depends(get_db),
-    user: CurrentUser = Depends(require_event_access),
+    user: CurrentUser = Depends(require_promotion),
 ):
     tier = RedemptionTier(event_id=event_id, points_required=payload.points_required, label=payload.label)
     db.add(tier)
@@ -636,7 +637,7 @@ def create_redemption_tier(
 
 @router.get("/redemption-tiers", response_model=list[RedemptionTierResponse])
 def list_redemption_tiers(
-    event_id: str, db: Session = Depends(get_db), user: CurrentUser = Depends(require_event_access)
+    event_id: str, db: Session = Depends(get_db), user: CurrentUser = Depends(require_promotion)
 ):
     return (
         db.query(RedemptionTier)
@@ -651,7 +652,7 @@ def delete_redemption_tier(
     event_id: str,
     tier_id: str,
     db: Session = Depends(get_db),
-    user: CurrentUser = Depends(require_event_access),
+    user: CurrentUser = Depends(require_promotion),
 ):
     tier = db.query(RedemptionTier).filter(RedemptionTier.id == tier_id, RedemptionTier.event_id == event_id).first()
     if not tier:
@@ -675,7 +676,7 @@ def list_redemption_options(
     event_id: str,
     code_id: str,
     db: Session = Depends(get_db),
-    user: CurrentUser = Depends(require_event_access),
+    user: CurrentUser = Depends(require_promotion),
 ):
     rows = (
         db.query(PromoCodeRedemptionOption, RedemptionTier)
@@ -707,7 +708,7 @@ def upsert_redemption_option(
     tier_id: str,
     payload: RedemptionOptionUpsertRequest,
     db: Session = Depends(get_db),
-    user: CurrentUser = Depends(require_event_access),
+    user: CurrentUser = Depends(require_promotion),
 ):
     if payload.cash_value is None and payload.ticket_value is None:
         raise HTTPException(status_code=400, detail="Set at least one of cash_value or ticket_value.")
@@ -759,7 +760,7 @@ def delete_redemption_option(
     code_id: str,
     tier_id: str,
     db: Session = Depends(get_db),
-    user: CurrentUser = Depends(require_event_access),
+    user: CurrentUser = Depends(require_promotion),
 ):
     option = (
         db.query(PromoCodeRedemptionOption)
@@ -780,7 +781,7 @@ def delete_redemption_option(
 
 @router.get("/reward-redemptions", response_model=list[RewardRedemptionResponse])
 def list_reward_redemptions(
-    event_id: str, db: Session = Depends(get_db), user: CurrentUser = Depends(require_event_access)
+    event_id: str, db: Session = Depends(get_db), user: CurrentUser = Depends(require_money)
 ):
     rows = (
         db.query(RewardRedemption, PromoCode, Guest)
@@ -814,7 +815,7 @@ def mark_redemption_paid(
     event_id: str,
     redemption_id: str,
     db: Session = Depends(get_db),
-    user: CurrentUser = Depends(require_event_access),
+    user: CurrentUser = Depends(require_money),
 ):
     row = (
         db.query(RewardRedemption, PromoCode, Guest)
@@ -855,7 +856,7 @@ def create_bonus_tier(
     event_id: str,
     payload: BonusTierCreateRequest,
     db: Session = Depends(get_db),
-    user: CurrentUser = Depends(require_event_access),
+    user: CurrentUser = Depends(require_promotion),
 ):
     """
     The organizer's default volume-bonus structure — applies to every
@@ -874,7 +875,7 @@ def create_bonus_tier(
 
 @router.get("/bonus-tiers", response_model=list[BonusTierResponse])
 def list_bonus_tiers(
-    event_id: str, db: Session = Depends(get_db), user: CurrentUser = Depends(require_event_access)
+    event_id: str, db: Session = Depends(get_db), user: CurrentUser = Depends(require_promotion)
 ):
     return (
         db.query(EventBonusTier)
@@ -889,7 +890,7 @@ def delete_bonus_tier(
     event_id: str,
     tier_id: str,
     db: Session = Depends(get_db),
-    user: CurrentUser = Depends(require_event_access),
+    user: CurrentUser = Depends(require_promotion),
 ):
     tier = db.query(EventBonusTier).filter(EventBonusTier.id == tier_id, EventBonusTier.event_id == event_id).first()
     if not tier:
@@ -906,7 +907,7 @@ def get_promo_code_bonus_tiers(
     event_id: str,
     code_id: str,
     db: Session = Depends(get_db),
-    user: CurrentUser = Depends(require_event_access),
+    user: CurrentUser = Depends(require_promotion),
 ):
     code = db.query(PromoCode).filter(PromoCode.id == code_id, PromoCode.event_id == event_id).first()
     if not code:
@@ -924,7 +925,7 @@ def set_promo_code_bonus_tiers(
     code_id: str,
     payload: PromoCodeBonusTiersRequest,
     db: Session = Depends(get_db),
-    user: CurrentUser = Depends(require_event_access),
+    user: CurrentUser = Depends(require_promotion),
 ):
     """Sets this code's OWN bonus tiers, overriding the event default
     entirely — including submitting an empty list, which means "no
@@ -949,7 +950,7 @@ def clear_promo_code_bonus_tiers(
     event_id: str,
     code_id: str,
     db: Session = Depends(get_db),
-    user: CurrentUser = Depends(require_event_access),
+    user: CurrentUser = Depends(require_promotion),
 ):
     """Clears this code's override, reverting it back to inheriting the
     event's default bonus tiers."""

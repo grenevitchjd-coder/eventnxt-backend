@@ -24,7 +24,7 @@ from app.schemas.event_profile import (
     PublicEventProfileResponse,
 )
 from app.services.deps import CurrentUser
-from app.services.event_access import require_event_access
+from app.services.permissions import require_setup
 from app.services.slugs import generate_unique_slug
 from app.services.file_upload import upload_banner_photo
 
@@ -111,7 +111,7 @@ def _split_schedule_for_public(items):
 
 @router.get("/events/{event_id}/profile", response_model=EventProfileResponse)
 def get_profile(
-    event_id: str, db: Session = Depends(get_db), user: CurrentUser = Depends(require_event_access)
+    event_id: str, db: Session = Depends(get_db), user: CurrentUser = Depends(require_setup)
 ):
     return _get_or_404(db, event_id)
 
@@ -121,7 +121,7 @@ def upsert_profile(
     event_id: str,
     payload: EventProfileCreateOrUpdateRequest,
     db: Session = Depends(get_db),
-    user: CurrentUser = Depends(require_event_access),
+    user: CurrentUser = Depends(require_setup),
 ):
     """
     Creates the profile on first save, updates it on every save after.
@@ -175,7 +175,7 @@ async def upload_profile_banner(
     event_id: str,
     file: UploadFile = File(...),
     db: Session = Depends(get_db),
-    user: CurrentUser = Depends(require_event_access),
+    user: CurrentUser = Depends(require_setup),
 ):
     profile = _get_or_404(db, event_id)
     url = await upload_banner_photo(file)
@@ -190,7 +190,7 @@ async def upload_profile_logo(
     event_id: str,
     file: UploadFile = File(...),
     db: Session = Depends(get_db),
-    user: CurrentUser = Depends(require_event_access),
+    user: CurrentUser = Depends(require_setup),
 ):
     profile = _get_or_404(db, event_id)
     url = await upload_banner_photo(file)  # same validation/storage — just a different destination field
@@ -205,7 +205,7 @@ def set_refund_policy(
     event_id: str,
     payload: RefundPolicyUpdateRequest,
     db: Session = Depends(get_db),
-    user: CurrentUser = Depends(require_event_access),
+    user: CurrentUser = Depends(require_setup),
 ):
     """Set (or clear, with null/empty) the refund policy shown at checkout
     and on the buyer's order page. Get-or-creates the profile so this
@@ -222,7 +222,7 @@ async def upload_venue_map(
     event_id: str,
     file: UploadFile = File(...),
     db: Session = Depends(get_db),
-    user: CurrentUser = Depends(require_event_access),
+    user: CurrentUser = Depends(require_setup),
 ):
     """Upload the venue/seating map image — shown on the public page in
     every ticketing mode (an external-ticketing event still wants buyers
@@ -239,7 +239,7 @@ async def upload_venue_map(
 def remove_venue_map(
     event_id: str,
     db: Session = Depends(get_db),
-    user: CurrentUser = Depends(require_event_access),
+    user: CurrentUser = Depends(require_setup),
 ):
     profile = _get_or_404(db, event_id)
     profile.venue_map_url = None
@@ -250,7 +250,7 @@ def remove_venue_map(
 
 @router.post("/events/{event_id}/profile/publish", response_model=EventProfileResponse)
 def publish_profile(
-    event_id: str, db: Session = Depends(get_db), user: CurrentUser = Depends(require_event_access)
+    event_id: str, db: Session = Depends(get_db), user: CurrentUser = Depends(require_setup)
 ):
     profile = _get_or_404(db, event_id)
     _refresh_cached_dates(profile, user)
@@ -263,7 +263,7 @@ def publish_profile(
 
 @router.post("/events/{event_id}/profile/unpublish", response_model=EventProfileResponse)
 def unpublish_profile(
-    event_id: str, db: Session = Depends(get_db), user: CurrentUser = Depends(require_event_access)
+    event_id: str, db: Session = Depends(get_db), user: CurrentUser = Depends(require_setup)
 ):
     profile = _get_or_404(db, event_id)
     profile.is_published = False
@@ -277,7 +277,7 @@ def unpublish_profile(
 
 @router.get("/events/{event_id}/profile/links", response_model=list[EventProfileLinkResponse])
 def list_links(
-    event_id: str, db: Session = Depends(get_db), user: CurrentUser = Depends(require_event_access)
+    event_id: str, db: Session = Depends(get_db), user: CurrentUser = Depends(require_setup)
 ):
     profile = _get_or_404(db, event_id)
     return (
@@ -293,7 +293,7 @@ def create_link(
     event_id: str,
     payload: EventProfileLinkCreateRequest,
     db: Session = Depends(get_db),
-    user: CurrentUser = Depends(require_event_access),
+    user: CurrentUser = Depends(require_setup),
 ):
     profile = _get_or_404(db, event_id)
     link = EventProfileLink(
@@ -310,7 +310,7 @@ def delete_link(
     event_id: str,
     link_id: str,
     db: Session = Depends(get_db),
-    user: CurrentUser = Depends(require_event_access),
+    user: CurrentUser = Depends(require_setup),
 ):
     profile = _get_or_404(db, event_id)
     link = (
@@ -329,7 +329,7 @@ def delete_link(
 
 @router.get("/events/{event_id}/profile/schedule", response_model=list[EventProfileScheduleItemResponse])
 def list_schedule_items(
-    event_id: str, db: Session = Depends(get_db), user: CurrentUser = Depends(require_event_access)
+    event_id: str, db: Session = Depends(get_db), user: CurrentUser = Depends(require_setup)
 ):
     profile = _get_or_404(db, event_id)
     return (
@@ -347,7 +347,7 @@ def create_schedule_item(
     event_id: str,
     payload: EventProfileScheduleItemCreateRequest,
     db: Session = Depends(get_db),
-    user: CurrentUser = Depends(require_event_access),
+    user: CurrentUser = Depends(require_setup),
 ):
     profile = _get_or_404(db, event_id)
     if payload.is_recurring:
@@ -374,7 +374,7 @@ def delete_schedule_item(
     event_id: str,
     item_id: str,
     db: Session = Depends(get_db),
-    user: CurrentUser = Depends(require_event_access),
+    user: CurrentUser = Depends(require_setup),
 ):
     profile = _get_or_404(db, event_id)
     item = (
@@ -393,7 +393,7 @@ def delete_schedule_item(
 
 @router.get("/events/{event_id}/profile/photos", response_model=list[EventProfilePhotoResponse])
 def list_gallery_photos(
-    event_id: str, db: Session = Depends(get_db), user: CurrentUser = Depends(require_event_access)
+    event_id: str, db: Session = Depends(get_db), user: CurrentUser = Depends(require_setup)
 ):
     profile = _get_or_404(db, event_id)
     return (
@@ -409,7 +409,7 @@ async def upload_gallery_photo(
     event_id: str,
     file: UploadFile = File(...),
     db: Session = Depends(get_db),
-    user: CurrentUser = Depends(require_event_access),
+    user: CurrentUser = Depends(require_setup),
 ):
     profile = _get_or_404(db, event_id)
     existing_count = (
@@ -432,7 +432,7 @@ def delete_gallery_photo(
     event_id: str,
     photo_id: str,
     db: Session = Depends(get_db),
-    user: CurrentUser = Depends(require_event_access),
+    user: CurrentUser = Depends(require_setup),
 ):
     profile = _get_or_404(db, event_id)
     photo = (

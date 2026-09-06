@@ -18,7 +18,7 @@ from app.schemas.guest_type import (
     TicketAllotmentDayUpsertRequest,
 )
 from app.services.deps import CurrentUser
-from app.services.event_access import require_event_access
+from app.services.permissions import require_setup
 
 router = APIRouter(prefix="/events/{event_id}/guest-types", tags=["guest-types"])
 
@@ -37,7 +37,7 @@ def create_guest_type(
     event_id: str,
     payload: GuestTypeCreateRequest,
     db: Session = Depends(get_db),
-    user: CurrentUser = Depends(require_event_access),
+    user: CurrentUser = Depends(require_setup),
 ):
     """
     Event-scoped — different events for the same org can define their own
@@ -62,7 +62,7 @@ def create_guest_type(
 
 @router.get("", response_model=list[GuestTypeResponse])
 def list_guest_types(
-    event_id: str, db: Session = Depends(get_db), user: CurrentUser = Depends(require_event_access)
+    event_id: str, db: Session = Depends(get_db), user: CurrentUser = Depends(require_setup)
 ):
     return db.query(GuestType).filter(GuestType.event_id == event_id).all()
 
@@ -73,7 +73,7 @@ def update_guest_type(
     guest_type_id: str,
     payload: GuestTypeUpdateRequest,
     db: Session = Depends(get_db),
-    user: CurrentUser = Depends(require_event_access),
+    user: CurrentUser = Depends(require_setup),
 ):
     guest_type = _get_guest_type_or_404(db, event_id, guest_type_id)
     guest_type.name = payload.name
@@ -92,7 +92,7 @@ def delete_guest_type(
     event_id: str,
     guest_type_id: str,
     db: Session = Depends(get_db),
-    user: CurrentUser = Depends(require_event_access),
+    user: CurrentUser = Depends(require_setup),
 ):
     guest_type = _get_guest_type_or_404(db, event_id, guest_type_id)
 
@@ -122,7 +122,7 @@ def list_seating_priorities(
     event_id: str,
     guest_type_id: str,
     db: Session = Depends(get_db),
-    user: CurrentUser = Depends(require_event_access),
+    user: CurrentUser = Depends(require_setup),
 ):
     _get_guest_type_or_404(db, event_id, guest_type_id)
     return (
@@ -143,7 +143,7 @@ def add_seating_priority(
     guest_type_id: str,
     payload: GuestTypeSeatingPriorityCreateRequest,
     db: Session = Depends(get_db),
-    user: CurrentUser = Depends(require_event_access),
+    user: CurrentUser = Depends(require_setup),
 ):
     """Always appends to the end of the list — see reordering note in the schema."""
     _get_guest_type_or_404(db, event_id, guest_type_id)
@@ -215,7 +215,7 @@ def delete_seating_priority(
     guest_type_id: str,
     priority_id: str,
     db: Session = Depends(get_db),
-    user: CurrentUser = Depends(require_event_access),
+    user: CurrentUser = Depends(require_setup),
 ):
     _get_guest_type_or_404(db, event_id, guest_type_id)
     priority = (
@@ -237,7 +237,7 @@ def list_ticket_allotments(
     event_id: str,
     guest_type_id: str,
     db: Session = Depends(get_db),
-    user: CurrentUser = Depends(require_event_access),
+    user: CurrentUser = Depends(require_setup),
 ):
     _get_guest_type_or_404(db, event_id, guest_type_id)
     return (
@@ -255,7 +255,7 @@ def upsert_ticket_allotment_day(
     date: str,
     payload: TicketAllotmentDayUpsertRequest,
     db: Session = Depends(get_db),
-    user: CurrentUser = Depends(require_event_access),
+    user: CurrentUser = Depends(require_setup),
 ):
     """
     Set (or update) the ticket quantity for one specific day — "10 for
@@ -284,7 +284,7 @@ def delete_ticket_allotment_day(
     guest_type_id: str,
     date: str,
     db: Session = Depends(get_db),
-    user: CurrentUser = Depends(require_event_access),
+    user: CurrentUser = Depends(require_setup),
 ):
     _get_guest_type_or_404(db, event_id, guest_type_id)
     row = (
