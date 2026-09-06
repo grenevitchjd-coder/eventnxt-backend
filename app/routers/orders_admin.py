@@ -60,6 +60,7 @@ def _serialize(order: Order, items: list[OrderItem], ticket_count: int) -> Admin
             for i in items
         ],
         ticket_count=ticket_count,
+        marketing_opt_in=bool(order.marketing_opt_in),
         created_at=order.created_at,
         paid_at=order.paid_at,
         refunded_at=order.refunded_at,

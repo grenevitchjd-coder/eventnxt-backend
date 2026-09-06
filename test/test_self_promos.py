@@ -110,7 +110,7 @@ def main():
     print("== 3. checkout with a self promo: attributed, rewardless, bonus-proof ==")
     c.post(f"/events/{EV}/bonus-tiers", json={"tickets_required": 1, "bonus_value": 100}, headers=H)
     r = c.post(f"/public/events/{slug}/checkout",
-               json={"buyer_name": "Buyer", "buyer_email": "b@x.com", "promo_code": "earlybird",
+               json={"terms_accepted": True, "buyer_name": "Buyer", "buyer_email": "b@x.com", "promo_code": "earlybird",
                      "items": [{"ticket_type_id": tt["id"], "quantity": 2}]})
     check("100%-off self promo checkout instant-paid", r.status_code == 200 and r.json().get("status") == "paid",
           f"{r.status_code} {r.text[:200]}")

@@ -75,7 +75,7 @@ def bootstrap(ev, name, qty, admits=1):
 def buy(slug, tt_id, qty=1):
     return client.post(
         f"/public/events/{slug}/checkout",
-        json={"buyer_name": "B", "buyer_email": "b@x.com",
+        json={"terms_accepted": True, "buyer_name": "B", "buyer_email": "b@x.com",
               "items": [{"ticket_type_id": tt_id, "quantity": qty}]},
     )
 

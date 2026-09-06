@@ -151,7 +151,7 @@ def main():
     # ---- 3. buyer can't buy an assigned seat ----
     r = client.post(
         f"/public/events/{slug}/checkout",
-        json={"buyer_name": "B", "buyer_email": "b@x.com",
+        json={"terms_accepted": True, "buyer_name": "B", "buyer_email": "b@x.com",
               "items": [{"ticket_type_id": tt["id"], "quantity": 1, "seat_ids": [by_num[4]["id"]]}]},
     )
     check("buyer refused on assigned seat", r.status_code == 400, r.text)
@@ -159,7 +159,7 @@ def main():
     # ---- 4. can't assign sold / other-guest seats ----
     r = client.post(
         f"/public/events/{slug}/checkout",
-        json={"buyer_name": "B", "buyer_email": "b@x.com",
+        json={"terms_accepted": True, "buyer_name": "B", "buyer_email": "b@x.com",
               "items": [{"ticket_type_id": tt["id"], "quantity": 1, "seat_ids": [by_num[1]["id"]]}]},
     )
     check("seat 1 sells to a buyer", r.status_code == 200, r.text)

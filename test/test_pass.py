@@ -67,7 +67,7 @@ TT_BASE = {"description": None, "price_cents": 0, "max_per_order": 10, "admits":
 def buy(slug, tt_id, seat_ids, name="B"):
     return client.post(
         f"/public/events/{slug}/checkout",
-        json={"buyer_name": name, "buyer_email": f"{name.lower()}@x.com",
+        json={"terms_accepted": True, "buyer_name": name, "buyer_email": f"{name.lower()}@x.com",
               "items": [{"ticket_type_id": tt_id, "quantity": len(seat_ids), "seat_ids": seat_ids}]},
     )
 

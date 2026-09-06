@@ -107,13 +107,13 @@ def main():
     # ---- 3. checkout: reserved refused, free mints ----
     r = client.post(
         f"/public/events/{slug}/checkout",
-        json={"buyer_name": "B", "buyer_email": "b@x.com",
+        json={"terms_accepted": True, "buyer_name": "B", "buyer_email": "b@x.com",
               "items": [{"ticket_type_id": tt["id"], "quantity": 1, "seat_ids": [by_num[3]["id"]]}]},
     )
     check("checkout of reserved seat refused", r.status_code == 400, r.text)
     r = client.post(
         f"/public/events/{slug}/checkout",
-        json={"buyer_name": "B", "buyer_email": "b@x.com",
+        json={"terms_accepted": True, "buyer_name": "B", "buyer_email": "b@x.com",
               "items": [{"ticket_type_id": tt["id"], "quantity": 1, "seat_ids": [by_num[1]["id"]]}]},
     )
     check("free seat 1 checkout mints ($0 sync)", r.status_code == 200, r.text)
@@ -136,7 +136,7 @@ def main():
     )
     r = client.post(
         f"/public/events/{slug}/checkout",
-        json={"buyer_name": "C", "buyer_email": "c@x.com",
+        json={"terms_accepted": True, "buyer_name": "C", "buyer_email": "c@x.com",
               "items": [{"ticket_type_id": tt["id"], "quantity": 1, "seat_ids": [by_num[3]["id"]]}]},
     )
     check("released seat 3 purchasable", r.status_code == 200, r.text)
@@ -162,7 +162,7 @@ def main():
     def buyer():
         rr = client.post(
             f"/public/events/{slug}/checkout",
-            json={"buyer_name": "R", "buyer_email": "r@x.com",
+            json={"terms_accepted": True, "buyer_name": "R", "buyer_email": "r@x.com",
                   "items": [{"ticket_type_id": tt["id"], "quantity": 1, "seat_ids": [sid2]}]},
         )
         results.append(("buy", rr.status_code))

@@ -3,7 +3,7 @@
 import enum
 import uuid
 
-from sqlalchemy import Column, DateTime, Enum as SAEnum, ForeignKey, Integer, String
+from sqlalchemy import Boolean, Column, DateTime, Enum as SAEnum, ForeignKey, Integer, String, false as sa_false
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.sql import func
 
@@ -86,6 +86,12 @@ class Order(Base):
     # platform-account, $0, and pre-0047 orders.
     reserve_cents = Column(Integer, nullable=False, default=0, server_default="0")
     reserve_released_at = Column(DateTime(timezone=True), nullable=True)
+    # Purchasing agreement (0048): when the buyer accepted the Ticket
+    # Purchasing Agreement (required, enforced at checkout; null =
+    # pre-agreement order) and whether they opted into Organizer
+    # marketing (optional, default false — §7's explicit consent).
+    terms_accepted_at = Column(DateTime(timezone=True), nullable=True)
+    marketing_opt_in = Column(Boolean, nullable=False, default=False, server_default=sa_false())
 
     order_token = Column(String, nullable=False, unique=True, index=True)
 

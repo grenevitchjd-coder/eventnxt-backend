@@ -125,6 +125,13 @@ class CheckoutRequest(BaseModel):
     # browser remembered from a tracked invite link. Optional, silently
     # ignored when stale; see start_checkout for the resolution rules.
     referral_contact_token: Optional[str] = None
+    # Purchasing agreement (0048): the required agree-box. Defaults False
+    # so an old client that doesn't send it gets a clear 400, never a
+    # silent unagreed sale.
+    terms_accepted: bool = False
+    # §7's optional marketing consent — the Organizer may email about
+    # future events. Explicit opt-IN only.
+    marketing_opt_in: bool = False
 
 
 class CheckoutResponse(BaseModel):
@@ -212,6 +219,7 @@ class AdminOrderResponse(BaseModel):
     created_at: Optional[datetime] = None
     paid_at: Optional[datetime] = None
     refunded_at: Optional[datetime] = None
+    marketing_opt_in: bool = False  # §7 consent, shown to the organizer
 
 # ---------- Assigned-seat picker ----------
 

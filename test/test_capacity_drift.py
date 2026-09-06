@@ -90,7 +90,7 @@ def main():
     c.patch(f"/events/{EV}/profile/refund-policy", json={"refund_policy": "none"}, headers=H)
     slug = c.post(f"/events/{EV}/profile/publish", headers=H).json()["slug"]
     r = c.post(f"/public/events/{slug}/checkout",
-               json={"buyer_name": "Buyer", "buyer_email": "b@x.com",
+               json={"terms_accepted": True, "buyer_name": "Buyer", "buyer_email": "b@x.com",
                      "items": [{"ticket_type_id": t["id"], "quantity": 12}]})
     check("checkout for 12 (past the old 10) is accepted", r.status_code == 200, f"{r.status_code} {r.text[:120]}")
     t = edit_qty(t, 6)

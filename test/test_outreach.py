@@ -73,7 +73,7 @@ TT = {"description": None, "max_per_order": 20, "admits": 1, "sales_start": None
 
 
 def buy(slug, tt_id, email, qty=1, promo=None, r=None):
-    body = {"buyer_name": "Buyer", "buyer_email": email,
+    body = {"terms_accepted": True, "buyer_name": "Buyer", "buyer_email": email,
             "items": [{"ticket_type_id": tt_id, "quantity": qty}]}
     if promo is not None:
         body["promo_code"] = promo

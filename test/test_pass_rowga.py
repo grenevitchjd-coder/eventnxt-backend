@@ -69,7 +69,7 @@ TT_BASE = {"description": None, "price_cents": 0, "max_per_order": 10, "admits":
 def buy(slug, items, name="B"):
     return client.post(
         f"/public/events/{slug}/checkout",
-        json={"buyer_name": name, "buyer_email": f"{name.lower()}@x.com", "items": items},
+        json={"terms_accepted": True, "buyer_name": name, "buyer_email": f"{name.lower()}@x.com", "items": items},
     )
 
 

@@ -133,7 +133,7 @@ def main():
 
     def buy(email, ticket_type_id, qty=1):
         return c.post(f"/public/events/{slug}/checkout",
-                      json={"buyer_name": "B", "buyer_email": email,
+                      json={"terms_accepted": True, "buyer_name": "B", "buyer_email": email,
                             "items": [{"ticket_type_id": ticket_type_id, "quantity": qty,
                                        "seat_ids": [], "zone_section_id": None, "zone_section_ids": []}]})
 

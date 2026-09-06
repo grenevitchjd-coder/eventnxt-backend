@@ -109,7 +109,7 @@ def main():
     slug = client.post(f"/events/{EV}/profile/publish", headers=H).json()["slug"]
     fri_seats = client.get(f"/events/{EV}/seating-categories/{pool['id']}/seats", headers=H).json()
     r = client.post(f"/public/events/{slug}/checkout",
-                    json={"buyer_name": "F", "buyer_email": "f@x.com",
+                    json={"terms_accepted": True, "buyer_name": "F", "buyer_email": "f@x.com",
                           "items": [{"ticket_type_id": tt["id"], "quantity": 1, "seat_ids": [fri_seats[0]["id"]]}]})
     check("friday seat 1 sells", r.status_code == 200, r.text)
     order = client.get(f"/public/orders/{r.json()['order_token']}").json()
@@ -131,7 +131,7 @@ def main():
     check("public listing carries dates for grouping",
           sorted(by_name.get("Row 1", [])) == [D1, D2, D3] and by_name.get("Weekend Package") == [None], by_name)
     r = client.post(f"/public/events/{slug}/checkout",
-                    json={"buyer_name": "P", "buyer_email": "p@x.com",
+                    json={"terms_accepted": True, "buyer_name": "P", "buyer_email": "p@x.com",
                           "items": [{"ticket_type_id": pkg.json()["id"], "quantity": 1}]})
     order = client.get(f"/public/orders/{r.json()['order_token']}").json()
     check("package mints one dated code per day",

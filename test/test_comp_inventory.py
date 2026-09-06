@@ -103,9 +103,9 @@ check("GA: 2 comps leave 1 sellable", ga_after["comp_held"] == 2 and ga_after["a
 client.put(f"/events/{EV}/profile", json={"title": "Fest"}, headers=H)
 client.post(f"/events/{EV}/profile/publish", json={}, headers=H)
 slug = client.get(f"/events/{EV}/profile", headers=H).json()["slug"]
-r = client.post(f"/public/events/{slug}/checkout", json={"buyer_name": "B", "buyer_email": "b@example.com", "items": [{"ticket_type_id": ga["id"], "quantity": 2}]})
+r = client.post(f"/public/events/{slug}/checkout", json={"terms_accepted": True, "buyer_name": "B", "buyer_email": "b@example.com", "items": [{"ticket_type_id": ga["id"], "quantity": 2}]})
 check("checkout REJECTS buying past the comp holds", r.status_code == 400, f"{r.status_code} {r.text[:120]}")
-r = client.post(f"/public/events/{slug}/checkout", json={"buyer_name": "B", "buyer_email": "b@example.com", "items": [{"ticket_type_id": ga["id"], "quantity": 1}]})
+r = client.post(f"/public/events/{slug}/checkout", json={"terms_accepted": True, "buyer_name": "B", "buyer_email": "b@example.com", "items": [{"ticket_type_id": ga["id"], "quantity": 1}]})
 check("checkout still sells the true remainder", r.status_code == 200, f"{r.status_code} {r.text[:120]}")
 
 print()

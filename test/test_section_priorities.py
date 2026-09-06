@@ -129,7 +129,7 @@ def main():
     check("explicit Section B ok", e2.get("section_label") == "B", e2)
     r = client.post(
         f"/public/events/{slug}/checkout",
-        json={"buyer_name": "Buyer", "buyer_email": "b@x.com",
+        json={"terms_accepted": True, "buyer_name": "Buyer", "buyer_email": "b@x.com",
               "items": [{"ticket_type_id": tt1["id"], "quantity": 1, "zone_section_id": sections["B"]["id"]}]},
     )
     check("box office buys 1 head in B", r.status_code == 200, r.text)

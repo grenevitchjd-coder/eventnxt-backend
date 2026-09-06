@@ -12,6 +12,8 @@ until we 200 them.
 
 import uuid
 
+from datetime import datetime, timezone
+
 import stripe as stripe_lib
 from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.exc import IntegrityError
@@ -268,6 +270,15 @@ def public_seat_map(slug: str, ticket_type_id: uuid.UUID, db: Session = Depends(
 def start_checkout(slug: str, payload: CheckoutRequest, db: Session = Depends(get_db)):
     profile = _published_profile_or_404(db, slug)
 
+    # Purchasing agreement (0048): enforced FIRST, before any code
+    # validation or inventory work — an unagreed checkout should fail
+    # identically whether the cart is paid or free, and hold nothing.
+    if not payload.terms_accepted:
+        raise HTTPException(
+            status_code=400,
+            detail="Please agree to the Ticket Purchasing Agreement & Terms of Sale to continue.",
+        )
+
     # Promo code: resolve before anything else — a bad code should fail
     # fast, before inventory is held or payment started.
     promo_code = None
@@ -315,6 +326,10 @@ def start_checkout(slug: str, payload: CheckoutRequest, db: Session = Depends(ge
         )
         if referral_contact is not None:
             order.referral_contact_id = referral_contact.id
+        # Stamp the agreement acceptance + §7 marketing consent on the
+        # order itself — the consent record travels with the sale.
+        order.terms_accepted_at = datetime.now(timezone.utc)
+        order.marketing_opt_in = bool(payload.marketing_opt_in)
     except ticketing.CheckoutError as exc:
         db.rollback()
         raise HTTPException(status_code=400, detail=str(exc))
