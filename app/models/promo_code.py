@@ -17,12 +17,20 @@ class RewardType(str, enum.Enum):
 
 class PromoCode(Base):
     """
-    A referral/promo code belonging to one referrer (a Guest — a
-    referrer is just a person in the system, same as anyone else, so
-    this reuses Guest rather than inventing a parallel "contact" concept).
-    One referrer can hold several codes (e.g. one per channel), each with
-    its own reward terms, so two codes for the same person aren't forced
-    to share a deal.
+    A promo code — one of two kinds, told apart by guest_id:
+
+    - guest_id set: a REFERRAL code belonging to one referrer (a Guest —
+      a referrer is just a person in the system, same as anyone else, so
+      this reuses Guest rather than inventing a parallel "contact"
+      concept). One referrer can hold several codes (e.g. one per
+      channel), each with its own reward terms, so two codes for the
+      same person aren't forced to share a deal.
+    - guest_id NULL: a SELF PROMO (migration 0042) — a marketing code
+      the org creates for itself (EARLYBIRD, WEEKEND20). Nobody earns
+      from it, so reward_type is NULL too and the whole reward/points/
+      bonus machinery stays out of its way: compute_reward returns None
+      and check_and_award_bonuses skips it. Discount, click tracking,
+      and sale attribution work identically for both kinds.
 
     reward_value is nullable because a POINTS code doesn't use it at
     all — its earning rates live in PromoCodePointsRate instead, one row
@@ -51,11 +59,11 @@ class PromoCode(Base):
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     event_id = Column(UUID(as_uuid=True), nullable=False, index=True)
-    guest_id = Column(UUID(as_uuid=True), ForeignKey("guests.id"), nullable=False)
+    guest_id = Column(UUID(as_uuid=True), ForeignKey("guests.id"), nullable=True)  # NULL = self promo (0042)
     code = Column(String, nullable=False, index=True)  # unique per event, enforced at the DB level
     reward_type = Column(
-        SAEnum(RewardType, name="reward_type", values_callable=lambda e: [x.value for x in e]), nullable=False
-    )
+        SAEnum(RewardType, name="reward_type", values_callable=lambda e: [x.value for x in e]), nullable=True
+    )  # NULL only for self promos (guest_id NULL) — API-enforced pairing
     reward_value = Column(Numeric, nullable=True)
     bonus_tiers_overridden = Column(Boolean, nullable=False, default=False)
 

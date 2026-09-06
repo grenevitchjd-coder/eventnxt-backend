@@ -82,6 +82,12 @@ def check_and_award_bonuses(db: Session, event_id: str, promo_code_id: str) -> l
     promo_code = db.query(PromoCode).filter(PromoCode.id == promo_code_id).with_for_update().first()
     if not promo_code:
         return []
+    if promo_code.guest_id is None:
+        # Self promo (0042) — no referrer, so no bonuses, even though it
+        # would otherwise INHERIT the event's default tiers. Without this
+        # guard a self promo would silently accrue BonusAward rows for
+        # nobody.
+        return []
 
     # This app's sessions run with autoflush=False, so a Sale row added
     # earlier in the same request (e.g. by reconcile_sale_row, just

@@ -27,9 +27,13 @@ class PointsRateItem(BaseModel):
 
 
 class PromoCodeCreateRequest(BaseModel):
-    guest_id: uuid.UUID
+    # NULL guest_id = a SELF PROMO (org's own marketing code, e.g.
+    # EARLYBIRD) — no referrer, no reward, so reward_type must be
+    # omitted too. Set guest_id = a referral code, where reward_type is
+    # required exactly as before. The pairing is enforced in the router.
+    guest_id: Optional[uuid.UUID] = None
     code: str
-    reward_type: Literal["flat_amount", "percentage", "free_tickets", "points"]
+    reward_type: Optional[Literal["flat_amount", "percentage", "free_tickets", "points"]] = None
     # Required for flat_amount / percentage / free_tickets; ignored for
     # points (which uses points_rates instead) — enforced in the router,
     # since which fields are required depends on reward_type.
@@ -48,7 +52,9 @@ class PromoCodeCreateRequest(BaseModel):
 
 class PromoCodeUpdateRequest(BaseModel):
     code: str
-    reward_type: Literal["flat_amount", "percentage", "free_tickets", "points"]
+    # Must stay None for a self promo, must be set for a referral code —
+    # a code's kind (guest_id) never changes on edit, only its terms.
+    reward_type: Optional[Literal["flat_amount", "percentage", "free_tickets", "points"]] = None
     reward_value: Optional[Decimal] = Field(default=None, ge=0)
     points_rates: Optional[List[PointsRateItem]] = None
     referral_message_draft: Optional[str] = None
@@ -62,9 +68,9 @@ class PromoCodeUpdateRequest(BaseModel):
 class PromoCodeResponse(BaseModel):
     id: uuid.UUID
     event_id: uuid.UUID
-    guest_id: uuid.UUID
+    guest_id: Optional[uuid.UUID] = None  # None = self promo
     code: str
-    reward_type: str
+    reward_type: Optional[str] = None  # None = self promo (no reward terms)
     reward_value: Optional[Decimal] = None
     points_rates: List[PointsRateItem] = []
     referral_message_draft: Optional[str] = None
@@ -225,3 +231,25 @@ class BonusAwardItem(BaseModel):
 
 
 PromoCodeResponse.model_rebuild()
+
+class PromoStatRow(BaseModel):
+    """
+    One code's performance rollup for the Promo Tracking / Referral
+    Payouts pages — aggregated from the shared Sale table, so native
+    orders and CSV-imported box-office sales count identically.
+    """
+
+    id: uuid.UUID
+    code: str
+    guest_id: Optional[uuid.UUID] = None  # None = self promo
+    referrer_name: Optional[str] = None  # the guest's name when guest_id is set
+    discount_type: Optional[str] = None
+    discount_value: Optional[Decimal] = None
+    link_clicks: int = 0
+    sale_count: int = 0  # transactions
+    tickets_sold: int = 0  # SUM(quantity) — heads, not transactions
+    # SUM(amount) over rows that HAVE an amount; rows_missing_amount says
+    # how many didn't (CSV imports may omit it), so a low-looking total
+    # is explainable rather than silently wrong.
+    amount_sold: Decimal = Decimal(0)
+    rows_missing_amount: int = 0

@@ -1,6 +1,7 @@
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.database import get_db
@@ -26,6 +27,7 @@ from app.schemas.sales import (
     PromoCodeCreateRequest,
     PromoCodeResponse,
     PromoCodeUpdateRequest,
+    PromoStatRow,
     RedemptionOptionResponse,
     RedemptionOptionUpsertRequest,
     RedemptionTierCreateRequest,
@@ -62,7 +64,7 @@ def _serialize_promo_code(db: Session, code: PromoCode) -> PromoCodeResponse:
         event_id=code.event_id,
         guest_id=code.guest_id,
         code=code.code,
-        reward_type=code.reward_type.value,
+        reward_type=code.reward_type.value if code.reward_type is not None else None,
         reward_value=code.reward_value,
         points_rates=[PointsRateItem(ticket_type=r.ticket_type, points=r.points) for r in rate_rows],
         referral_message_draft=code.referral_message_draft,
@@ -145,9 +147,21 @@ def create_promo_code(
     db: Session = Depends(get_db),
     user: CurrentUser = Depends(require_event_access),
 ):
-    guest = db.query(Guest).filter(Guest.id == payload.guest_id, Guest.event_id == event_id).first()
-    if not guest:
-        raise HTTPException(status_code=404, detail="Guest not found for this event.")
+    # Two kinds of code (0042): guest_id set = referral code (reward
+    # terms required, as always); guest_id None = SELF PROMO — the org's
+    # own marketing code, which must NOT carry reward machinery.
+    if payload.guest_id is not None:
+        guest = db.query(Guest).filter(Guest.id == payload.guest_id, Guest.event_id == event_id).first()
+        if not guest:
+            raise HTTPException(status_code=404, detail="Guest not found for this event.")
+        if payload.reward_type is None:
+            raise HTTPException(status_code=400, detail="A referral code needs a reward_type.")
+    else:
+        if payload.reward_type is not None or payload.points_rates:
+            raise HTTPException(
+                status_code=400,
+                detail="A self promo (no referrer) can't have reward terms — create it from Referral Setup if someone should earn from it.",
+            )
 
     existing = (
         db.query(PromoCode)
@@ -157,14 +171,17 @@ def create_promo_code(
     if existing:
         raise HTTPException(status_code=400, detail=f'The code "{payload.code}" is already in use for this event.')
 
-    _validate_reward_fields(payload.reward_type, payload.reward_value, payload.points_rates)
+    if payload.guest_id is not None:
+        _validate_reward_fields(payload.reward_type, payload.reward_value, payload.points_rates)
+    elif payload.reward_value is not None:
+        raise HTTPException(status_code=400, detail="A self promo can't have a reward_value.")
     _validate_discount_fields(payload.discount_type, payload.discount_value)
 
     code = PromoCode(
         event_id=event_id,
         guest_id=payload.guest_id,
         code=payload.code,
-        reward_type=RewardType(payload.reward_type),
+        reward_type=RewardType(payload.reward_type) if payload.reward_type is not None else None,
         reward_value=payload.reward_value,
         referral_message_draft=payload.referral_message_draft,
         discount_type=payload.discount_type,
@@ -212,11 +229,19 @@ def update_promo_code(
                 status_code=400, detail=f'The code "{payload.code}" is already in use for this event.'
             )
 
-    _validate_reward_fields(payload.reward_type, payload.reward_value, payload.points_rates)
+    # A code's kind never changes on edit — a self promo stays reward-less,
+    # a referral code keeps requiring reward terms.
+    if code.guest_id is not None:
+        if payload.reward_type is None:
+            raise HTTPException(status_code=400, detail="A referral code needs a reward_type.")
+        _validate_reward_fields(payload.reward_type, payload.reward_value, payload.points_rates)
+    else:
+        if payload.reward_type is not None or payload.reward_value is not None or payload.points_rates:
+            raise HTTPException(status_code=400, detail="A self promo (no referrer) can't have reward terms.")
     _validate_discount_fields(payload.discount_type, payload.discount_value)
 
     code.code = payload.code
-    code.reward_type = RewardType(payload.reward_type)
+    code.reward_type = RewardType(payload.reward_type) if payload.reward_type is not None else None
     code.reward_value = payload.reward_value
     code.referral_message_draft = payload.referral_message_draft
     code.discount_type = payload.discount_type
@@ -258,6 +283,62 @@ def delete_promo_code(
 @router.get("/sales", response_model=list[SaleResponse])
 def list_sales(event_id: str, db: Session = Depends(get_db), user: CurrentUser = Depends(require_event_access)):
     return db.query(Sale).filter(Sale.event_id == event_id).order_by(Sale.imported_at.desc()).all()
+
+
+@router.get("/promo-stats", response_model=list[PromoStatRow])
+def promo_stats(event_id: str, db: Session = Depends(get_db), user: CurrentUser = Depends(require_event_access)):
+    """
+    Per-code performance for the Promo Tracking and Referral Payouts
+    pages: transactions, tickets (SUM of quantity — a bulk row counts
+    all its heads), and dollars, aggregated from the shared Sale table —
+    so native orders and CSV imports count identically, and the numbers
+    here can never disagree with the Sales list below them. Codes with
+    zero sales still appear (a promo that moved nothing is exactly what
+    this page exists to reveal). Refunded orders' Sale rows are not
+    reversed today, matching sale_count everywhere else — if refund
+    netting ever lands, it lands in the Sale table and this page follows
+    for free.
+    """
+    agg = (
+        db.query(
+            Sale.promo_code_id.label("pcid"),
+            func.count(Sale.id).label("sale_count"),
+            func.coalesce(func.sum(Sale.quantity), 0).label("tickets_sold"),
+            func.coalesce(func.sum(Sale.amount), 0).label("amount_sold"),
+            func.count(Sale.id).filter(Sale.amount.is_(None)).label("rows_missing_amount"),
+        )
+        .filter(Sale.event_id == event_id, Sale.promo_code_id.isnot(None))
+        .group_by(Sale.promo_code_id)
+        .all()
+    )
+    by_code = {row.pcid: row for row in agg}
+
+    rows = (
+        db.query(PromoCode, Guest.name)
+        .outerjoin(Guest, Guest.id == PromoCode.guest_id)
+        .filter(PromoCode.event_id == event_id)
+        .order_by(PromoCode.created_at)
+        .all()
+    )
+    out = []
+    for code, referrer_name in rows:
+        a = by_code.get(code.id)
+        out.append(
+            PromoStatRow(
+                id=code.id,
+                code=code.code,
+                guest_id=code.guest_id,
+                referrer_name=referrer_name,
+                discount_type=code.discount_type,
+                discount_value=code.discount_value,
+                link_clicks=code.link_clicks,
+                sale_count=a.sale_count if a else 0,
+                tickets_sold=int(a.tickets_sold) if a else 0,
+                amount_sold=a.amount_sold if a else 0,
+                rows_missing_amount=a.rows_missing_amount if a else 0,
+            )
+        )
+    return out
 
 
 @router.post("/sales/import", response_model=SalesImportResult)
@@ -418,6 +499,8 @@ def upsert_redemption_option(
     code = db.query(PromoCode).filter(PromoCode.id == code_id, PromoCode.event_id == event_id).first()
     if not code:
         raise HTTPException(status_code=404, detail="Promo code not found.")
+    if code.guest_id is None:
+        raise HTTPException(status_code=400, detail="A self promo has no referrer to redeem rewards — redemption options only apply to referral codes.")
     tier = db.query(RedemptionTier).filter(RedemptionTier.id == tier_id, RedemptionTier.event_id == event_id).first()
     if not tier:
         raise HTTPException(status_code=404, detail="Redemption tier not found.")
@@ -633,6 +716,8 @@ def set_promo_code_bonus_tiers(
     code = db.query(PromoCode).filter(PromoCode.id == code_id, PromoCode.event_id == event_id).first()
     if not code:
         raise HTTPException(status_code=404, detail="Promo code not found.")
+    if code.guest_id is None:
+        raise HTTPException(status_code=400, detail="A self promo has no referrer to earn bonuses — bonus tiers only apply to referral codes.")
     code.bonus_tiers_overridden = True
     bonuses_service.replace_promo_code_bonus_tiers(db, code_id, payload.tiers)
     db.commit()

@@ -85,6 +85,9 @@ def compute_reward(
     represents the sale's full dollar value (50 tickets' worth), so
     multiplying by quantity on top of that would double-count.
     """
+    if promo_code.reward_type is None:
+        # Self promo (0042) — nobody earns from it, by definition.
+        return None
     if promo_code.reward_type == RewardType.FLAT_AMOUNT:
         return promo_code.reward_value * quantity
     if promo_code.reward_type == RewardType.PERCENTAGE:
