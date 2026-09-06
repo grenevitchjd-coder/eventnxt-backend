@@ -1,7 +1,7 @@
 import enum
 import uuid
 
-from sqlalchemy import Column, DateTime, Enum as SAEnum, ForeignKey, Integer, Numeric, String
+from sqlalchemy import Boolean, Column, DateTime, Enum as SAEnum, ForeignKey, Integer, Numeric, String
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.sql import func
 
@@ -38,6 +38,15 @@ class Sale(Base):
     event_id = Column(UUID(as_uuid=True), nullable=False, index=True)
     promo_code_id = Column(UUID(as_uuid=True), ForeignKey("promo_codes.id"), nullable=True)
     referral_contact_id = Column(UUID(as_uuid=True), ForeignKey("referral_contacts.id"), nullable=True)  # 0044
+    # 0049: THE match, stamped at import by services/sale_matching —
+    # which room this sale consumed and on which night. What seating
+    # math counts; NULL on pre-0049 rows (normalized-name fallback) and
+    # on non-admission rows. SET NULL on pool delete: sales outlive rooms.
+    seating_category_id = Column(
+        UUID(as_uuid=True), ForeignKey("seating_categories.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    event_day = Column(String, nullable=True)  # ISO date — the show night, NOT the purchase date
+    is_admission = Column(Boolean, nullable=False, default=True, server_default="true")  # false: drink coupons etc.
 
     buyer_name = Column(String, nullable=True)
     buyer_email = Column(String, nullable=True)

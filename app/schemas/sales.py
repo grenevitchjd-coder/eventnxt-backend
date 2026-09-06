@@ -124,6 +124,35 @@ class SalesImportRow(BaseModel):
     promo_code: Optional[str] = None
     sale_date: Optional[str] = None
     external_transaction_id: Optional[str] = None
+    # 0049: the SHOW night this file covers (the staging day selector) —
+    # a day token inside ticket_type wins over it; sale_date never
+    # routes days (it's the purchase date). And the raw discount cell
+    # ("Coupon VANESSA2510: -$19.50") for coupon parsing when there's no
+    # promo-code column.
+    event_day: Optional[str] = None
+    discount_text: Optional[str] = None
+
+
+class SaleTypeMappingItem(BaseModel):
+    raw_label: str
+    seating_category_id: Optional[uuid.UUID] = None
+    face_value_cents: Optional[int] = Field(default=None, ge=0)
+    is_admission: bool = True
+
+
+class SaleTypeMappingsPutRequest(BaseModel):
+    mappings: List[SaleTypeMappingItem]
+
+
+class SaleTypeMappingResponse(BaseModel):
+    id: uuid.UUID
+    raw_label: str
+    seating_category_id: Optional[uuid.UUID] = None
+    face_value_cents: Optional[int] = None
+    is_admission: bool
+
+    class Config:
+        from_attributes = True
 
 
 class SalesImportRequest(BaseModel):

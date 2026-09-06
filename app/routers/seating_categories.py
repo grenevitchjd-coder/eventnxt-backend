@@ -8,7 +8,6 @@ from app.models.guest import Guest, GuestAllocationStatus
 from app.models.guest_type_seating_priority import GuestTypeSeatingPriority
 from app.models.order import Order, OrderStatus
 from app.models.order_item import OrderItem
-from app.models.sale import Sale, SaleSource
 from app.models.ticket_type import TicketType
 from app.models.seating_category import SeatingCategory
 from app.models.zone_section import ZoneSection
@@ -25,6 +24,7 @@ from app.schemas.seating_category import (
     SeatingCategoryResponse,
     SeatingSummaryRow,
 )
+from app.services import sales as sales_service
 from app.services import seats as seats_service
 from app.services.deps import CurrentUser
 from app.services.event_access import require_event_access
@@ -426,20 +426,11 @@ def get_seating_summary(
     for category in categories:
         # Box office counts HEADS. Native sales: paid order items × the
         # ticket type's `admits` (a $400 table admitting 4 is 4 heads
-        # against this pool). CSV-imported sales predate admits and
-        # count as-is. Native Sale rows are EXCLUDED here to avoid
-        # double-counting — they still record units for promo/referral
-        # math, which must never be inflated by admits.
-        csv_heads = (
-            db.query(func.coalesce(func.sum(Sale.quantity), 0))
-            .filter(
-                Sale.event_id == event_id,
-                Sale.ticket_type.ilike(category.name),
-                Sale.source != SaleSource.NATIVE,
-            )
-            .scalar()
-            or 0
-        )
+        # against this pool). Imported sales count via the shared
+        # imported_heads_for_pool (0049 stamp + legacy normalized-name
+        # fallback; native Sale rows and non-admission rows excluded
+        # there, so nothing double-counts or inflates by admits).
+        csv_heads = sales_service.imported_heads_for_pool(db, category)
         native_heads = (
             db.query(func.coalesce(func.sum(OrderItem.quantity * TicketType.admits), 0))
             .join(TicketType, TicketType.id == OrderItem.ticket_type_id)

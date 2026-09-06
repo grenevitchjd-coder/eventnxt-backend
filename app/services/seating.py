@@ -176,14 +176,13 @@ def _pool_room_components(db: Session, category: SeatingCategory, exclude_guest_
     """
     (bought, given) heads at POOL level for a section-less pool: box
     office = paid native heads for the pool's types + imported sales
-    matched by name (the same census the pool summary uses); given =
+    counted via the shared imported_heads_for_pool (stamp + legacy name fallback — the same census the pool summary uses); given =
     comp heads homed at the pool (confirmed, or pending with pull-now),
     any section. Used where a sectionless pool needs a room check or a
     display row.
     """
     from app.models.order import Order, OrderStatus
     from app.models.order_item import OrderItem
-    from app.models.sale import Sale, SaleSource
     from app.models.ticket_type import TicketType
 
     native = (
@@ -198,16 +197,9 @@ def _pool_room_components(db: Session, category: SeatingCategory, exclude_guest_
         .scalar()
         or 0
     )
-    csv_heads = (
-        db.query(func.coalesce(func.sum(Sale.quantity), 0))
-        .filter(
-            Sale.event_id == category.event_id,
-            Sale.ticket_type.ilike(category.name),
-            Sale.source != SaleSource.NATIVE,
-        )
-        .scalar()
-        or 0
-    )
+    from app.services.sales import imported_heads_for_pool
+
+    csv_heads = imported_heads_for_pool(db, category)
     comp_q = db.query(func.coalesce(func.sum(Guest.party_size), 0)).filter(
         Guest.seating_category_id == category.id,
         or_(

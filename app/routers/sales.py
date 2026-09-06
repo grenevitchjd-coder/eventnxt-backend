@@ -21,6 +21,9 @@ from app.models.reward_redemption import PayoutStatus, RewardRedemption
 from app.models.sale import Sale
 from app.models.sales_config import SalesConfig, SalesPlatform
 from app.schemas.sales import (
+    SaleTypeMappingItem,
+    SaleTypeMappingsPutRequest,
+    SaleTypeMappingResponse,
     BonusAwardItem,
     BonusTierCreateRequest,
     BonusTierItem,
@@ -45,6 +48,10 @@ from app.schemas.sales import (
 )
 from app.services import bonuses as bonuses_service
 from app.services import redemptions as redemptions_service
+from app.services.comp_tickets import event_days_for
+from app.services.seating import normalized_name
+from app.models.seating_category import SeatingCategory
+from app.services import sale_matching
 from app.services import sales as sales_service
 from app.services import email as email_service
 from app.services.deps import CurrentUser
@@ -454,6 +461,51 @@ def promo_stats(event_id: str, db: Session = Depends(get_db), user: CurrentUser 
     return out
 
 
+@router.get("/sales/type-mappings", response_model=list[SaleTypeMappingResponse])
+def list_sale_type_mappings(
+    event_id: str, db: Session = Depends(get_db), user: CurrentUser = Depends(require_event_access)
+):
+    from app.models.sale_type_mapping import SaleTypeMapping
+
+    return (
+        db.query(SaleTypeMapping)
+        .filter(SaleTypeMapping.event_id == event_id)
+        .order_by(SaleTypeMapping.raw_label)
+        .all()
+    )
+
+
+@router.put("/sales/type-mappings", response_model=list[SaleTypeMappingResponse])
+def put_sale_type_mappings(
+    event_id: str,
+    payload: SaleTypeMappingsPutRequest,
+    db: Session = Depends(get_db),
+    user: CurrentUser = Depends(require_event_access),
+):
+    """
+    Bulk upsert of the organizer's label->area answers from import
+    staging (0049). Keyed by NORMALIZED label per event, so "Row 2 " and
+    "row 2" are one mapping. Mappings only shape FUTURE imports —
+    already-imported rows keep the stamp they got (re-uploading the same
+    file re-stamps nothing thanks to barcode dedup; a corrective
+    re-import means deleting the affected sales first, unchanged
+    behavior).
+    """
+    from app.models.sale_type_mapping import SaleTypeMapping
+
+    for item in payload.mappings:
+        sale_matching.upsert_mapping(
+            db, event_id, item.raw_label, item.seating_category_id, item.face_value_cents, item.is_admission
+        )
+    db.commit()
+    return (
+        db.query(SaleTypeMapping)
+        .filter(SaleTypeMapping.event_id == event_id)
+        .order_by(SaleTypeMapping.raw_label)
+        .all()
+    )
+
+
 @router.post("/sales/import", response_model=SalesImportResult)
 def import_sales(
     event_id: str,
@@ -472,6 +524,15 @@ def import_sales(
     incoming_ids = [r.external_transaction_id for r in payload.rows if r.external_transaction_id]
     already_seen = sales_service.existing_transaction_ids(db, event_id, incoming_ids)
 
+    # 0049: one shared match pass per row (coupon parse, mapping lookup,
+    # day routing, stamp) — batch context fetched once.
+    days = event_days_for(db, event_id)
+    mappings = sale_matching.get_mappings(db, event_id)
+    pools_by_norm = {
+        normalized_name(p.name): p.id
+        for p in db.query(SeatingCategory).filter(SeatingCategory.event_id == event_id).all()
+    }
+
     imported = 0
     skipped_duplicates = 0
     unmatched_code_count = 0
@@ -481,7 +542,7 @@ def import_sales(
         if row.external_transaction_id and row.external_transaction_id in already_seen:
             skipped_duplicates += 1
             continue
-        sale = sales_service.reconcile_sale_row(
+        enriched = sale_matching.enrich_import_row(
             db,
             event_id,
             {
@@ -493,8 +554,14 @@ def import_sales(
                 "promo_code": row.promo_code,
                 "sale_date": row.sale_date,
                 "external_transaction_id": row.external_transaction_id,
+                "event_day": row.event_day,
+                "discount_text": row.discount_text,
             },
+            days,
+            mappings,
+            pools_by_norm,
         )
+        sale = sales_service.reconcile_sale_row(db, event_id, enriched)
         if row.promo_code and sale.promo_code_id is None:
             unmatched_code_count += 1
         if sale.promo_code_id is not None:

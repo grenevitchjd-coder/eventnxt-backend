@@ -168,6 +168,12 @@ def reconcile_sale_row(db: Session, event_id: str, row: dict) -> Sale:
         source=SaleSource.CSV_UPLOAD,
         computed_reward=reward,
         referral_contact_id=referral_contact_id,
+        # 0049 stamps from services/sale_matching (default for callers
+        # that don't pre-enrich: unstamped admission row -> the same
+        # normalized-name fallback pre-0049 rows use).
+        seating_category_id=row.get("seating_category_id"),
+        event_day=row.get("event_day"),
+        is_admission=row.get("is_admission", True),
     )
     db.add(sale)
     return sale
@@ -190,6 +196,51 @@ def existing_transaction_ids(db: Session, event_id: str, transaction_ids: list) 
         .all()
     )
     return {r[0] for r in rows}
+
+def imported_heads_for_pool(db: Session, category) -> int:
+    """
+    Imported (non-native) sold heads counted against one pool — THE
+    function both Seating summary and comp-room math call (0049), so the
+    number shown and the number enforced are structurally the same.
+
+    Stamped rows (0049+) count by their seating_category_id stamp —
+    rename-proof, day-routed at import. Unstamped rows (pre-0049, or
+    labels nobody has mapped yet) fall back to a NORMALIZED name match
+    against the pool (trim / collapse whitespace / case — the old exact
+    ilike silently dropped "Row 2 " with a trailing space). Non-admission
+    rows (drink coupons etc.) never count anywhere.
+    """
+    from sqlalchemy import func as sa_func
+
+    from app.services.seating import normalized_name
+
+    stamped = (
+        db.query(sa_func.coalesce(sa_func.sum(Sale.quantity), 0))
+        .filter(
+            Sale.event_id == category.event_id,
+            Sale.seating_category_id == category.id,
+            Sale.is_admission.is_(True),
+            Sale.source != SaleSource.NATIVE,
+        )
+        .scalar()
+        or 0
+    )
+    legacy = (
+        db.query(sa_func.coalesce(sa_func.sum(Sale.quantity), 0))
+        .filter(
+            Sale.event_id == category.event_id,
+            Sale.seating_category_id.is_(None),
+            Sale.is_admission.is_(True),
+            Sale.source != SaleSource.NATIVE,
+            Sale.ticket_type.isnot(None),
+            sa_func.btrim(sa_func.regexp_replace(sa_func.lower(Sale.ticket_type), r"\s+", " ", "g"))
+            == normalized_name(category.name),
+        )
+        .scalar()
+        or 0
+    )
+    return int(stamped) + int(legacy)
+
 
 def sale_aggregates_by_code(db: Session, event_id: str) -> dict:
     """
