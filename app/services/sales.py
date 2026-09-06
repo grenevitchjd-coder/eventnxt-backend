@@ -208,6 +208,7 @@ def sale_aggregates_by_code(db: Session, event_id: str) -> dict:
             func.coalesce(func.sum(Sale.amount), 0).label("amount_sold"),
             func.count(Sale.id).filter(Sale.amount.is_(None)).label("rows_missing_amount"),
             func.sum(Sale.computed_reward).label("total_reward"),
+            func.max(Sale.imported_at).label("last_sale_at"),
         )
         .filter(Sale.event_id == event_id, Sale.promo_code_id.isnot(None))
         .group_by(Sale.promo_code_id)

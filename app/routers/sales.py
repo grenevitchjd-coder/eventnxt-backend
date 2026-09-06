@@ -448,6 +448,7 @@ def promo_stats(event_id: str, db: Session = Depends(get_db), user: CurrentUser 
                 tickets_sold=int(a.tickets_sold) if a else 0,
                 amount_sold=a.amount_sold if a else 0,
                 rows_missing_amount=a.rows_missing_amount if a else 0,
+                last_sale_at=a.last_sale_at if a else None,
             )
         )
     return out

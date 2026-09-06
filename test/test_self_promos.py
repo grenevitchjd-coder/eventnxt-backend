@@ -149,11 +149,14 @@ def main():
           sa and str(sa["rows_missing_amount"]))
     check("referral code carries referrer_name", sa and sa["referrer_name"] == "Sarah",
           sa and str(sa["referrer_name"]))
+    check("last_sale_at set once sales exist", e and e["last_sale_at"] is not None and sa and sa["last_sale_at"] is not None)
     zero = c.post(f"/events/{EV}/promo-codes",
                   json={"code": "GHOST", "discount_type": "flat_amount", "discount_value": 1}, headers=H)
+    ghost_rows = c.get(f"/events/{EV}/promo-stats", headers=H).json()
     check("zero-sale code appears in stats", zero.status_code == 201 and
-          any(x["code"] == "GHOST" and x["tickets_sold"] == 0
-              for x in c.get(f"/events/{EV}/promo-stats", headers=H).json()))
+          any(x["code"] == "GHOST" and x["tickets_sold"] == 0 for x in ghost_rows))
+    check("zero-sale code has no last_sale_at",
+          any(x["code"] == "GHOST" and x["last_sale_at"] is None for x in ghost_rows))
 
     print()
     if failures:

@@ -254,3 +254,6 @@ class PromoStatRow(BaseModel):
     # is explainable rather than silently wrong.
     amount_sold: Decimal = Decimal(0)
     rows_missing_amount: int = 0
+    # When this code's numbers last moved — max(imported_at) across its
+    # sales (native rows get imported_at at paid time). None = no sales.
+    last_sale_at: Optional[datetime] = None
