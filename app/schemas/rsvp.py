@@ -83,6 +83,20 @@ class ReferralCodeInfo(BaseModel):
     points_available: Optional[int] = None  # only meaningful for a points-type code
     eligible_tiers: List[EligibleTier] = []
     redemption_history: List["RedemptionHistoryItem"] = []
+    # ---- Progress dashboard (Promote-redesign slice D) ----
+    # Aggregated by the SAME function that feeds the organizer's
+    # /promo-stats, so referrer and organizer always see one truth.
+    tickets_sold: int = 0
+    amount_sold: float = 0
+    rows_missing_amount: int = 0
+    link_clicks: int = 0
+    # Accrued reward in the code's own unit ($ / tickets / points) —
+    # the "estimated payout" for non-points deals; points deals read
+    # points_available + eligible_tiers instead.
+    total_reward: Optional[float] = None
+    # So the portal can tell followers what the code is worth to THEM.
+    discount_type: Optional[str] = None
+    discount_value: Optional[float] = None
 
 
 class RedemptionHistoryItem(BaseModel):

@@ -3,7 +3,10 @@ from typing import Optional
 
 from sqlalchemy.orm import Session
 
+from sqlalchemy import func
+
 from app.models.promo_code import PromoCode, RewardType
+from app.models.sale import Sale
 from app.models.promo_code_points_rate import PromoCodePointsRate
 from app.models.sale import Sale, SaleSource
 from app.models.sales_config import SalesPlatform
@@ -158,3 +161,27 @@ def existing_transaction_ids(db: Session, event_id: str, transaction_ids: list) 
         .all()
     )
     return {r[0] for r in rows}
+
+def sale_aggregates_by_code(db: Session, event_id: str) -> dict:
+    """
+    Per-promo-code rollup of the shared Sale table: transactions,
+    tickets (SUM of quantity), dollars (SUM of amount over rows that
+    have one), rows missing an amount, and accrued reward (SUM of
+    computed_reward). Feeds BOTH the organizer's /promo-stats and the
+    referrer portal — one function, so the number a referrer sees is
+    the number the organizer sees, structurally.
+    """
+    rows = (
+        db.query(
+            Sale.promo_code_id.label("pcid"),
+            func.count(Sale.id).label("sale_count"),
+            func.coalesce(func.sum(Sale.quantity), 0).label("tickets_sold"),
+            func.coalesce(func.sum(Sale.amount), 0).label("amount_sold"),
+            func.count(Sale.id).filter(Sale.amount.is_(None)).label("rows_missing_amount"),
+            func.sum(Sale.computed_reward).label("total_reward"),
+        )
+        .filter(Sale.event_id == event_id, Sale.promo_code_id.isnot(None))
+        .group_by(Sale.promo_code_id)
+        .all()
+    )
+    return {r.pcid: r for r in rows}

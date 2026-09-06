@@ -14,6 +14,10 @@
 #   4. send-portal-link: refuses before a code exists, sends after (text
 #      contains the /referrer/<token> link and the share link once the
 #      page is published).
+#   5. (Slice D) The portal's per-code progress numbers — tickets sold,
+#      $ sold, accrued reward, link clicks — come from the SAME shared
+#      aggregator as the organizer's /promo-stats, and the two payloads
+#      agree exactly after a CSV import lands sales on the code.
 #
 # Run: DATABASE_URL="postgresql://test@/eventnxt_test?host=/tmp&port=5433" python3 test/test_referral_setup.py
 import os
@@ -136,6 +140,32 @@ def main():
            json={"portal_base_url": "https://x.test"}, headers=H)
     body = SENT[-1]["text"] if SENT else ""
     check("published event: share link included", f"/e/{slug}?ref=IVY15" in body, body[:300])
+
+    print("== 5. portal progress == /promo-stats (slice D) ==")
+    r = c.post(f"/events/{EV}/sales/import",
+               json={"rows": [
+                   {"promo_code": "IVY15", "buyer_name": "P", "buyer_email": "p@x.com", "amount": 200,
+                    "ticket_type": "GA", "quantity": 4, "sale_date": D1, "external_transaction_id": "d1"},
+                   {"promo_code": "IVY15", "buyer_name": "Q", "buyer_email": "q@x.com", "amount": None,
+                    "ticket_type": "GA", "quantity": 1, "sale_date": D1, "external_transaction_id": "d2"},
+               ]}, headers=H)
+    check("import for progress check accepted", r.status_code == 200, f"{r.status_code} {r.text[:120]}")
+    c.post(f"/public/events/{slug}/promo-codes/IVY15/click")
+    stats = {row["code"]: row for row in c.get(f"/events/{EV}/promo-stats", headers=H).json()}
+    portal = c.get(f"/public/rsvp/{ivy['rsvp_token']}").json()
+    pc = next((x for x in portal.get("referral_codes", []) if x["code"] == "IVY15"), None)
+    org = stats.get("IVY15")
+    check("portal carries progress fields", pc is not None and "tickets_sold" in (pc or {}), str(pc)[:200])
+    check("tickets agree with /promo-stats", pc and org and pc["tickets_sold"] == org["tickets_sold"] == 5,
+          f"portal {pc and pc['tickets_sold']} vs org {org and org['tickets_sold']}")
+    check("$ agree with /promo-stats", pc and org and float(pc["amount_sold"]) == float(org["amount_sold"]) == 200.0,
+          f"portal {pc and pc['amount_sold']} vs org {org and org['amount_sold']}")
+    check("missing-amount rows agree", pc and org and pc["rows_missing_amount"] == org["rows_missing_amount"] == 1)
+    check("accrued reward present (15% of $200 = 30)", pc and pc["total_reward"] == 30.0,
+          pc and str(pc["total_reward"]))
+    check("link clicks surfaced", pc and pc["link_clicks"] >= 1, pc and str(pc["link_clicks"]))
+    check("buyer discount surfaced for followers", pc and pc["discount_type"] == "percentage"
+          and pc["discount_value"] == 10.0)
 
     print()
     if failures:

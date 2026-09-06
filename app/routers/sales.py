@@ -421,19 +421,9 @@ def promo_stats(event_id: str, db: Session = Depends(get_db), user: CurrentUser 
     netting ever lands, it lands in the Sale table and this page follows
     for free.
     """
-    agg = (
-        db.query(
-            Sale.promo_code_id.label("pcid"),
-            func.count(Sale.id).label("sale_count"),
-            func.coalesce(func.sum(Sale.quantity), 0).label("tickets_sold"),
-            func.coalesce(func.sum(Sale.amount), 0).label("amount_sold"),
-            func.count(Sale.id).filter(Sale.amount.is_(None)).label("rows_missing_amount"),
-        )
-        .filter(Sale.event_id == event_id, Sale.promo_code_id.isnot(None))
-        .group_by(Sale.promo_code_id)
-        .all()
-    )
-    by_code = {row.pcid: row for row in agg}
+    # Shared with the referrer portal (sale_aggregates_by_code) — one
+    # function, one truth, org and referrer can never disagree.
+    by_code = sales_service.sale_aggregates_by_code(db, event_id)
 
     rows = (
         db.query(PromoCode, Guest.name)

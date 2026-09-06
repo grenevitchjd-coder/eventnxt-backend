@@ -26,6 +26,7 @@ from app.schemas.rsvp import (
     RSVPTicketRequestCreate,
 )
 from app.services import redemptions as redemptions_service
+from app.services import sales as sales_service
 from app.services import seating
 from app.services import comp_tickets
 
@@ -51,8 +52,10 @@ def _build_referral_codes(db: Session, event_id: str, guest_id: str):
     if not codes:
         return None
 
+    agg = sales_service.sale_aggregates_by_code(db, event_id)
     result = []
     for code in codes:
+        a = agg.get(code.id)
         points_available = (
             redemptions_service.points_available(db, code.id) if code.reward_type == RewardType.POINTS else None
         )
@@ -69,6 +72,13 @@ def _build_referral_codes(db: Session, event_id: str, guest_id: str):
                 code=code.code,
                 reward_type=code.reward_type.value,
                 points_available=points_available,
+                tickets_sold=int(a.tickets_sold) if a else 0,
+                amount_sold=float(a.amount_sold) if a else 0,
+                rows_missing_amount=a.rows_missing_amount if a else 0,
+                link_clicks=code.link_clicks,
+                total_reward=float(a.total_reward) if a and a.total_reward is not None else None,
+                discount_type=code.discount_type,
+                discount_value=float(code.discount_value) if code.discount_value is not None else None,
                 eligible_tiers=[
                     EligibleTier(
                         redemption_tier_id=str(t["tier"].id),
