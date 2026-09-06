@@ -37,6 +37,7 @@ from app.schemas.ticketing import AdminOrderResponse, AdminOrderItem
 from app.services.deps import CurrentUser
 from app.services.email import EmailNotConfigured, EmailSendError, send_email
 from app.services.permissions import require_money
+from app.models.guest import Guest
 from app.services.stripe_gateway import create_refund
 
 router = APIRouter(tags=["orders-admin"])
@@ -66,6 +67,27 @@ def _serialize(order: Order, items: list[OrderItem], ticket_count: int) -> Admin
         paid_at=order.paid_at,
         refunded_at=order.refunded_at,
     )
+
+
+@router.get("/events/{event_id}/orders/rsvp-summary")
+def rsvp_summary(
+    event_id: str,
+    db: Session = Depends(get_db),
+    user: CurrentUser = Depends(require_money),
+):
+    """
+    The one attendance number the Orders page shows: direct invitees'
+    confirmed RSVPs. Lives here (money area) rather than on Overview so
+    setup-only roles never see attendance figures — same invitee
+    definition the Invites page uses (delegated recipients excluded).
+    """
+    invitees = (
+        db.query(Guest)
+        .filter(Guest.event_id == event_id, Guest.allocated_by_guest_id.is_(None))
+        .all()
+    )
+    confirmed = sum(1 for g in invitees if g.rsvp_confirmed == "yes")
+    return {"rsvp_confirmed": confirmed, "invited": len(invitees)}
 
 
 @router.get("/events/{event_id}/orders", response_model=list[AdminOrderResponse])
