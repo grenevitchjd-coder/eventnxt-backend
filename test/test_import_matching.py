@@ -202,6 +202,34 @@ def main():
           s2["Champagne Lounge"]["box_office"] == 8 and s2["Champagne Lounge"]["committed"] == 3,
           s2["Champagne Lounge"])
 
+    # ---- 8. all-days packages (0050): one row, every night ----
+    c.put(f"/events/{EV}/sales/type-mappings", json={"mappings": [
+        {"raw_label": "Weekend Pass – Row 2 Preferred", "seating_category_id": row2["id"], "all_days": True},
+    ]}, headers=H)
+    before = {k: v["box_office"] for k, v in summary().items()}
+    res8 = imp([
+        {"buyer_name": "Pass Buyer", "ticket_type": "Weekend Pass – Row 2 Preferred", "quantity": 1,
+         "event_day": D1, "external_transaction_id": f"wkp-{uuid.uuid4()}"},  # file day deliberately set: must be ignored
+    ])
+    check("package row imports", res8["imported"] == 1, res8)
+    after = summary()
+    check("package counts into the base pool (night 1)",
+          after["Row 2 Preferred"]["box_office"] == before["Row 2 Preferred"] + 1, after["Row 2 Preferred"])
+    check("...and the (10/09) clone",
+          after["Row 2 Preferred (10/09)"]["box_office"] == before["Row 2 Preferred (10/09)"] + 1)
+    check("...and the (10/10) clone",
+          after["Row 2 Preferred (10/10)"]["box_office"] == before["Row 2 Preferred (10/10)"] + 1)
+    check("...but never into other families",
+          after["Champagne Lounge"]["box_office"] == before["Champagne Lounge"])
+    db = SessionLocal()
+    try:
+        pkg = db.query(Sale).filter(Sale.event_id == EV, Sale.all_days.is_(True)).first()
+        check("package stamp: base pool, no single day, all_days",
+              str(pkg.seating_category_id) == row2["id"] and pkg.event_day is None and pkg.all_days is True,
+              (pkg.seating_category_id, pkg.event_day, pkg.all_days))
+    finally:
+        db.close()
+
     print()
     if failures:
         print(f"import matching: {len(failures)} FAILURES: {failures}")

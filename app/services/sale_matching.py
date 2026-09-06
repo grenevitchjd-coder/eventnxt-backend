@@ -109,7 +109,7 @@ def get_mappings(db: Session, event_id: str) -> dict[str, SaleTypeMapping]:
     }
 
 
-def upsert_mapping(db: Session, event_id: str, raw_label, seating_category_id, face_value_cents, is_admission) -> SaleTypeMapping | None:
+def upsert_mapping(db: Session, event_id: str, raw_label, seating_category_id, face_value_cents, is_admission, all_days=False) -> SaleTypeMapping | None:
     """Upsert by NORMALIZED label; caller commits. Blank labels are ignored."""
     key = normalized_name(raw_label)
     if not key:
@@ -125,6 +125,7 @@ def upsert_mapping(db: Session, event_id: str, raw_label, seating_category_id, f
     row.seating_category_id = seating_category_id
     row.face_value_cents = face_value_cents
     row.is_admission = bool(is_admission)
+    row.all_days = bool(all_days)
     return row
 
 
@@ -150,7 +151,13 @@ def resolve_label(db: Session, event_id: str, label, file_day, days, mappings=No
     if mapping is not None:
         if not mapping.is_admission:
             return {"seating_category_id": None, "event_day": event_day, "is_admission": False,
-                    "face_value_cents": mapping.face_value_cents}
+                    "face_value_cents": mapping.face_value_cents, "all_days": False}
+        if mapping.all_days:
+            # A package: every night by definition. Stamp the BASE pool,
+            # no single day, no day routing — imported_heads_for_pool
+            # counts it into every family member.
+            return {"seating_category_id": mapping.seating_category_id, "event_day": None,
+                    "is_admission": True, "face_value_cents": mapping.face_value_cents, "all_days": True}
         pool_id = mapping.seating_category_id
     else:
         pool_id = pools_by_norm.get(full_norm) or pools_by_norm.get(base_norm)
@@ -158,7 +165,7 @@ def resolve_label(db: Session, event_id: str, label, file_day, days, mappings=No
     if pool_id and event_day:
         pool_id = pool_for_day(db, pool_id, event_day)
     return {"seating_category_id": pool_id, "event_day": event_day, "is_admission": True,
-            "face_value_cents": mapping.face_value_cents if mapping else None}
+            "face_value_cents": mapping.face_value_cents if mapping else None, "all_days": False}
 
 
 def enrich_import_row(db: Session, event_id: str, row: dict, days, mappings, pools_by_norm) -> dict:
@@ -178,6 +185,7 @@ def enrich_import_row(db: Session, event_id: str, row: dict, days, mappings, poo
     out["seating_category_id"] = res["seating_category_id"]
     out["event_day"] = res["event_day"]
     out["is_admission"] = res["is_admission"]
+    out["all_days"] = res["all_days"]
 
     if out.get("amount") is None and res["face_value_cents"] is not None:
         face = Decimal(res["face_value_cents"]) / 100

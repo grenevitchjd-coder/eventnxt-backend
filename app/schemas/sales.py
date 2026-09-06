@@ -138,6 +138,7 @@ class SaleTypeMappingItem(BaseModel):
     seating_category_id: Optional[uuid.UUID] = None
     face_value_cents: Optional[int] = Field(default=None, ge=0)
     is_admission: bool = True
+    all_days: bool = False  # 0050: weekend package — counts every night
 
 
 class SaleTypeMappingsPutRequest(BaseModel):
@@ -150,6 +151,7 @@ class SaleTypeMappingResponse(BaseModel):
     seating_category_id: Optional[uuid.UUID] = None
     face_value_cents: Optional[int] = None
     is_admission: bool
+    all_days: bool
 
     class Config:
         from_attributes = True

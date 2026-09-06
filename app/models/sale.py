@@ -47,6 +47,10 @@ class Sale(Base):
     )
     event_day = Column(String, nullable=True)  # ISO date — the show night, NOT the purchase date
     is_admission = Column(Boolean, nullable=False, default=True, server_default="true")  # false: drink coupons etc.
+    # 0050: a package/pass sold outside — consumes a head EVERY night.
+    # Stamped to the family's BASE pool, event_day NULL; counted into
+    # every family member by imported_heads_for_pool.
+    all_days = Column(Boolean, nullable=False, default=False, server_default="false")
 
     buyer_name = Column(String, nullable=True)
     buyer_email = Column(String, nullable=True)

@@ -174,6 +174,7 @@ def reconcile_sale_row(db: Session, event_id: str, row: dict) -> Sale:
         seating_category_id=row.get("seating_category_id"),
         event_day=row.get("event_day"),
         is_admission=row.get("is_admission", True),
+        all_days=row.get("all_days", False),
     )
     db.add(sale)
     return sale
@@ -204,7 +205,8 @@ def imported_heads_for_pool(db: Session, category) -> int:
     number shown and the number enforced are structurally the same.
 
     Stamped rows (0049+) count by their seating_category_id stamp —
-    rename-proof, day-routed at import. Unstamped rows (pre-0049, or
+    rename-proof, day-routed at import; all-days packages (0050) count
+    into every member of the pool's name family. Unstamped rows (pre-0049, or
     labels nobody has mapped yet) fall back to a NORMALIZED name match
     against the pool (trim / collapse whitespace / case — the old exact
     ilike silently dropped "Row 2 " with a trailing space). Non-admission
@@ -219,6 +221,36 @@ def imported_heads_for_pool(db: Session, category) -> int:
         .filter(
             Sale.event_id == category.event_id,
             Sale.seating_category_id == category.id,
+            Sale.is_admission.is_(True),
+            Sale.all_days.is_(False),  # packages counted family-wide below, never here
+            Sale.source != SaleSource.NATIVE,
+        )
+        .scalar()
+        or 0
+    )
+    # 0050: imported packages (all_days) consume a head EVERY night.
+    # They're stamped once, to the family's base pool; count them into
+    # THIS pool whenever it belongs to the same name family — base or
+    # any "(MM/DD)" sibling. A lone pool is its own family of one.
+    from app.models.seating_category import SeatingCategory
+    from app.services.seating import POOL_DAY_SUFFIX
+
+    def _family_key(name):
+        m = POOL_DAY_SUFFIX.search(str(name or ""))
+        return normalized_name((name or "")[: m.start()] if m else name)
+
+    my_family = _family_key(category.name)
+    family_ids = [
+        p.id
+        for p in db.query(SeatingCategory).filter(SeatingCategory.event_id == category.event_id).all()
+        if _family_key(p.name) == my_family
+    ]
+    packages = (
+        db.query(sa_func.coalesce(sa_func.sum(Sale.quantity), 0))
+        .filter(
+            Sale.event_id == category.event_id,
+            Sale.seating_category_id.in_(family_ids),
+            Sale.all_days.is_(True),
             Sale.is_admission.is_(True),
             Sale.source != SaleSource.NATIVE,
         )
@@ -239,7 +271,7 @@ def imported_heads_for_pool(db: Session, category) -> int:
         .scalar()
         or 0
     )
-    return int(stamped) + int(legacy)
+    return int(stamped) + int(packages) + int(legacy)
 
 
 def sale_aggregates_by_code(db: Session, event_id: str) -> dict:

@@ -42,4 +42,5 @@ class SaleTypeMapping(Base):
     )
     face_value_cents = Column(Integer, nullable=True)
     is_admission = Column(Boolean, nullable=False, default=True, server_default="true")
+    all_days = Column(Boolean, nullable=False, default=False, server_default="false")  # 0050: weekend package label
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)

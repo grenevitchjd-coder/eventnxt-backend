@@ -495,7 +495,8 @@ def put_sale_type_mappings(
 
     for item in payload.mappings:
         sale_matching.upsert_mapping(
-            db, event_id, item.raw_label, item.seating_category_id, item.face_value_cents, item.is_admission
+            db, event_id, item.raw_label, item.seating_category_id, item.face_value_cents,
+            item.is_admission, item.all_days
         )
     db.commit()
     return (
