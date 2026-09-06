@@ -2,7 +2,7 @@
 import uuid
 from datetime import datetime
 
-from typing import Optional
+from typing import List, Optional
 
 from pydantic import BaseModel, field_validator, model_validator
 
@@ -107,6 +107,22 @@ class SeatingCategoryResponse(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+class SectionAvailabilityRow(BaseModel):
+    section_label: Optional[str] = None  # None = the whole (sectionless) pool
+    capacity: int
+    bought: int  # box-office heads (paid/pending orders x admits, + imported sales for sectionless)
+    given: int  # comp heads placed here (confirmed + pending pull-now; seat pools: blocked seats + seatless confirmed)
+    left: int  # the SAME room checkout/placement enforce for this label
+
+
+class PoolSectionAvailability(BaseModel):
+    category_id: uuid.UUID
+    category_name: str
+    sales_grain: str
+    capacity: int
+    sections: List[SectionAvailabilityRow]
 
 
 class SeatingSummaryRow(BaseModel):

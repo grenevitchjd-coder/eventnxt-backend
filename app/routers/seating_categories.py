@@ -13,6 +13,8 @@ from app.models.ticket_type import TicketType
 from app.models.seating_category import SeatingCategory
 from app.models.zone_section import ZoneSection
 from app.schemas.seating_category import (
+    PoolSectionAvailability,
+    SectionAvailabilityRow,
     AdminSeatResponse,
     SeatBlockRequest,
     SeatUnblockRequest,
@@ -335,24 +337,35 @@ def get_seating_summary(
             or 0
         )
         box_office = csv_heads + native_heads
-        allotted = (
-            db.query(func.coalesce(func.sum(Guest.party_size), 0))
+        # Guest heads via the day/family-aware counter the sales side
+        # uses (guest_hold_heads): a guest homed at any family sibling
+        # counts against THIS pool's day with that day's grant — so a
+        # Friday comp shows on the Friday clone, and a 2/2/2 multi-night
+        # guest shows 2 on every night's pool. Seat-holding guests are
+        # excluded there (their seats consume), so blocked seats are
+        # added back: assigned-to-guest seats are committed, labeled
+        # unassigned blocks are reserved exposure (allotted).
+        from app.models.seat import Seat
+        from app.services.seating import guest_hold_heads
+
+        assigned_seats = (
+            db.query(func.count(Seat.id))
+            .filter(Seat.seating_category_id == category.id, Seat.guest_id.isnot(None))
+            .scalar()
+            or 0
+        )
+        labeled_blocks = (
+            db.query(func.count(Seat.id))
             .filter(
-                Guest.seating_category_id == category.id,
-                Guest.allocation_status.in_([GuestAllocationStatus.PENDING, GuestAllocationStatus.CONFIRMED]),
+                Seat.seating_category_id == category.id,
+                Seat.is_blocked.is_(True),
+                Seat.guest_id.is_(None),
             )
             .scalar()
             or 0
         )
-        committed = (
-            db.query(func.coalesce(func.sum(Guest.party_size), 0))
-            .filter(
-                Guest.seating_category_id == category.id,
-                Guest.allocation_status == GuestAllocationStatus.CONFIRMED,
-            )
-            .scalar()
-            or 0
-        )
+        allotted = guest_hold_heads(db, category, status_mode="offered") + assigned_seats + labeled_blocks
+        committed = guest_hold_heads(db, category, status_mode="confirmed") + assigned_seats
         rows.append(
             SeatingSummaryRow(
                 category_id=category.id,
@@ -361,11 +374,44 @@ def get_seating_summary(
                 box_office=box_office,
                 allotted=allotted,
                 committed=committed,
-                confirmed_avail=max(category.capacity - committed, 0),
+                confirmed_avail=max(category.capacity - committed - box_office, 0),
                 estimated_avail=max(category.capacity - allotted - box_office, 0),
             )
         )
     return rows
+
+@router.get("/section-summary", response_model=list[PoolSectionAvailability])
+def get_section_summary(
+    event_id: str,
+    db: Session = Depends(get_db),
+    user: CurrentUser = Depends(require_event_access),
+):
+    """
+    The pool summary decomposed one level: every pool with a row per
+    section — capacity, bought (box office), given (comps), left — where
+    `left` is computed by the SAME function checkout and comp placement
+    enforce, so this page can never disagree with what a buyer or a
+    placed recipient experiences. Sectionless pools return one row.
+    """
+    from app.services.seating import section_availability
+
+    categories = (
+        db.query(SeatingCategory)
+        .filter(SeatingCategory.event_id == event_id)
+        .order_by(SeatingCategory.name)
+        .all()
+    )
+    return [
+        PoolSectionAvailability(
+            category_id=c.id,
+            category_name=c.name,
+            sales_grain=c.sales_grain or "ga",
+            capacity=c.capacity,
+            sections=[SectionAvailabilityRow(**row) for row in section_availability(db, c)],
+        )
+        for c in categories
+    ]
+
 
 @router.get("/holds/labeled")
 def labeled_seat_holds(

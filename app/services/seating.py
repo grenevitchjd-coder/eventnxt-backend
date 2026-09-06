@@ -110,6 +110,146 @@ def pool_for_day(db: Session, base_pool_id, visit_date):
     return sibling.seating_category_id if sibling else base_pool_id
 
 
+def _pool_room_components(db: Session, category: SeatingCategory, exclude_guest_id=None) -> tuple[int, int]:
+    """
+    (bought, given) heads at POOL level for a section-less pool: box
+    office = paid native heads for the pool's types + imported sales
+    matched by name (the same census the pool summary uses); given =
+    comp heads homed at the pool (confirmed, or pending with pull-now),
+    any section. Used where a sectionless pool needs a room check or a
+    display row.
+    """
+    from app.models.order import Order, OrderStatus
+    from app.models.order_item import OrderItem
+    from app.models.sale import Sale, SaleSource
+    from app.models.ticket_type import TicketType
+
+    native = (
+        db.query(func.coalesce(func.sum(OrderItem.quantity * TicketType.admits), 0))
+        .join(TicketType, TicketType.id == OrderItem.ticket_type_id)
+        .join(Order, Order.id == OrderItem.order_id)
+        .filter(
+            Order.event_id == category.event_id,
+            Order.status == OrderStatus.PAID,
+            TicketType.seating_category_id == category.id,
+        )
+        .scalar()
+        or 0
+    )
+    csv_heads = (
+        db.query(func.coalesce(func.sum(Sale.quantity), 0))
+        .filter(
+            Sale.event_id == category.event_id,
+            Sale.ticket_type.ilike(category.name),
+            Sale.source != SaleSource.NATIVE,
+        )
+        .scalar()
+        or 0
+    )
+    comp_q = db.query(func.coalesce(func.sum(Guest.party_size), 0)).filter(
+        Guest.seating_category_id == category.id,
+        or_(
+            Guest.allocation_status == GuestAllocationStatus.CONFIRMED,
+            (Guest.allocation_status == GuestAllocationStatus.PENDING) & (Guest.hold_timing == "now"),
+        ),
+    )
+    if exclude_guest_id:
+        comp_q = comp_q.filter(Guest.id != exclude_guest_id)
+    return int(native + csv_heads), int(comp_q.scalar() or 0)
+
+
+def section_availability(db: Session, category: SeatingCategory) -> list[dict]:
+    """
+    Per-section (capacity, bought, given, left) for one pool — the SAME
+    numbers section_room_for_comps enforces at checkout and placement
+    time, decomposed for the Seating summary page (2026-09-05 slice).
+    `left` here always equals section_room_for_comps for that label.
+    Sectionless pools return one row with section_label None built from
+    pool-level components.
+    """
+    from app.models.zone_section import ZoneSection
+    from app.services import seats as seats_service
+
+    sections = (
+        db.query(ZoneSection)
+        .filter(ZoneSection.seating_category_id == category.id)
+        .order_by(ZoneSection.sort_order)
+        .all()
+    )
+    if not sections:
+        bought, given = _pool_room_components(db, category)
+        return [{
+            "section_label": None,
+            "capacity": category.capacity,
+            "bought": bought,
+            "given": given,
+            "left": max(category.capacity - bought - given, 0),
+        }]
+
+    rows = []
+    seen = []
+    for sec in sections:
+        if sec.section_label in seen:
+            continue
+        seen.append(sec.section_label)
+        label_secs = [s for s in sections if s.section_label == sec.section_label]
+        comp_heads = (
+            db.query(func.coalesce(func.sum(Guest.party_size), 0))
+            .filter(
+                Guest.seating_category_id == category.id,
+                Guest.section_label == sec.section_label,
+                or_(
+                    Guest.allocation_status == GuestAllocationStatus.CONFIRMED,
+                    (Guest.allocation_status == GuestAllocationStatus.PENDING) & (Guest.hold_timing == "now"),
+                ),
+            )
+            .scalar()
+            or 0
+        )
+        if category.sales_grain == "seat":
+            from app.models.seat import Seat
+
+            seats = (
+                db.query(Seat)
+                .filter(Seat.seating_category_id == category.id, Seat.section_label == sec.section_label)
+                .all()
+            )
+            taken = seats_service.taken_seat_ids(db, [s.id for s in seats]) if seats else set()
+            bought = sum(1 for s in seats if s.id in taken)
+            blocked = sum(1 for s in seats if s.is_blocked)
+            free = sum(1 for s in seats if s.id not in taken and not s.is_blocked)
+            seated_guest_ids = {s.guest_id for s in seats if s.guest_id}
+            seatless = (
+                db.query(func.coalesce(func.sum(Guest.party_size), 0))
+                .filter(
+                    Guest.seating_category_id == category.id,
+                    Guest.section_label == sec.section_label,
+                    Guest.allocation_status == GuestAllocationStatus.CONFIRMED,
+                    ~Guest.id.in_(seated_guest_ids) if seated_guest_ids else Guest.id.isnot(None),
+                )
+                .scalar()
+                or 0
+            )
+            rows.append({
+                "section_label": sec.section_label,
+                "capacity": len(seats),
+                "bought": bought,
+                "given": blocked + seatless,
+                "left": max(free - seatless, 0),
+            })
+            continue
+        capacity = sum(s.capacity for s in label_secs)
+        bought = sum(seats_service.section_heads_taken(db, s.id) for s in label_secs)
+        rows.append({
+            "section_label": sec.section_label,
+            "capacity": capacity,
+            "bought": int(bought),
+            "given": int(comp_heads),
+            "left": max(capacity - bought - comp_heads, 0),
+        })
+    return rows
+
+
 def resolve_parent_override(db: Session, parent, recipient_party: int, visit_date):
     """
     An allotment's explicit RECIPIENT seating (recipient_seating_category_id /
@@ -149,8 +289,11 @@ def resolve_parent_override(db: Session, parent, recipient_party: int, visit_dat
         .all()
     ]
     if not labels:
-        # sectionless pool: pool-level room check
-        return (category.id, None) if section_room_for_comps(db, category, None) >= recipient_party else (None, None)
+        # sectionless pool: pool-level room check (a label query would
+        # find no sections and report 0 forever)
+        bought, given = _pool_room_components(db, category)
+        room = max(category.capacity - bought - given, 0)
+        return (category.id, None) if room >= recipient_party else (None, None)
     for lbl in labels:
         if lbl == wanted:
             continue
