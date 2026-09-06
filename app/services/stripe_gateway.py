@@ -82,3 +82,62 @@ def create_refund(payment_intent_id: str):
     returned in the ledger arithmetic (Phase 3) rather than here."""
     _client()
     return stripe.Refund.create(payment_intent=payment_intent_id)
+
+# ---------- Stripe Connect (organizer payout accounts) ----------
+#
+# Express accounts, destination charges. EventNXT never collects payment
+# details itself: create the account, hand the organizer to Stripe-hosted
+# onboarding via an Account Link, and mirror status back through the
+# account.updated webhook. The 7-day payout delay is set here at account
+# creation — it buffers refunds/disputes against balances that have
+# already paid out (the platform eats failed debits under destination
+# charges, so the delay is our exposure control).
+
+PAYOUT_DELAY_DAYS = 7
+
+
+def create_express_account(organization_id: str):
+    _client()
+    return stripe.Account.create(
+        type="express",
+        capabilities={
+            "card_payments": {"requested": True},
+            "transfers": {"requested": True},
+        },
+        settings={"payouts": {"schedule": {"delay_days": PAYOUT_DELAY_DAYS, "interval": "daily"}}},
+        metadata={"organization_id": str(organization_id)},
+    )
+
+
+def create_account_link(stripe_account_id: str, return_url: str, refresh_url: str):
+    """
+    A one-time, minutes-lived URL into Stripe-hosted Express onboarding.
+    Expired/used links are NEVER an error state for us — mint a fresh one
+    on every click; that's what refresh_url exists for on Stripe's side.
+    """
+    _client()
+    return stripe.AccountLink.create(
+        account=stripe_account_id,
+        return_url=return_url,
+        refresh_url=refresh_url,
+        type="account_onboarding",
+    )
+
+
+def create_login_link(stripe_account_id: str):
+    """
+    A one-time URL into the organizer's Stripe Express dashboard (balance,
+    payout history, bank-account changes). Only valid once onboarding is
+    complete — callers gate on details_submitted.
+    """
+    _client()
+    return stripe.Account.create_login_link(stripe_account_id)
+
+
+def construct_connect_webhook_event(payload: bytes, signature_header: str):
+    """Same fail-closed rule as the platform webhook, separate secret."""
+    if not settings.stripe_connect_webhook_secret:
+        raise WebhookNotConfigured(
+            "STRIPE_CONNECT_WEBHOOK_SECRET is not set — refusing all Connect webhooks (fail closed)."
+        )
+    return stripe.Webhook.construct_event(payload, signature_header, settings.stripe_connect_webhook_secret)

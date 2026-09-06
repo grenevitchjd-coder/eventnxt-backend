@@ -28,3 +28,4 @@ from app.models.event_settings import EventSettings, TICKETING_MODES, SALES_SOUR
 from app.models.guest_ticket_request import GuestTicketRequest, REQUEST_STATUSES  # noqa: F401
 from app.models.zone_section import ZoneSection  # noqa: F401
 from app.models.seat import Seat, OrderItemSeat  # noqa: F401
+from app.models.payment_account import PaymentAccount  # noqa: F401

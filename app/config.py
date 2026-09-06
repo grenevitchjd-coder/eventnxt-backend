@@ -47,6 +47,11 @@ class Settings(BaseSettings):
     # it's empty (fail closed, never open).
     stripe_secret_key: str = ""
     stripe_webhook_secret: str = ""
+    # Signing secret for the SECOND webhook endpoint — the one registered
+    # with "Events from: Connected accounts" (account.updated). Separate
+    # endpoint, separate secret, same fail-closed rule: empty means the
+    # /webhooks/stripe-connect route rejects everything.
+    stripe_connect_webhook_secret: str = ""
 
     # EventNXT's platform fee, baked into the ticket's face value: the
     # buyer sees a clean price, the organizer bears the fee. These are
