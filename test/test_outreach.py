@@ -103,6 +103,13 @@ def main():
                 json={"guest_id": ben["id"], "code": "BEN10", "reward_type": "flat_amount",
                       "reward_value": 3}, headers=H).json()
 
+    # 0052: the payout-terms wall precedes everything referral-facing —
+    # sign it for both referrers so the suite exercises the flows behind it.
+    for who in (sarah, ben):
+        r = c.post(f"/public/rsvp/{who['rsvp_token']}/accept-payout-terms",
+                   json={"legal_name": f"{who['name']} Testperson"})
+        assert r.status_code == 200, r.text
+
     print("== 0. Outreach Policy gate (0051): accept first, stamped once ==")
     SENT.clear()
     r = c.post(f"/public/rsvp/{sarah['rsvp_token']}/refer",

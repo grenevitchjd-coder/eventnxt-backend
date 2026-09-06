@@ -32,6 +32,11 @@ class RSVPInfoResponse(BaseModel):
 
     guest_name: str
     outreach_terms_accepted_at: Optional[datetime] = None  # 0051: referrer accepted the Outreach Policy
+    # 0052: the payout-terms wall. True = this guest holds referral codes
+    # but hasn't accepted — referral_codes are WITHHELD from this payload
+    # until POST /accept-payout-terms with a full legal name.
+    payout_terms_required: bool = False
+    payout_terms_accepted_at: Optional[datetime] = None
     guest_type_name: Optional[str] = None  # None for referrer-only guests
     allocation_status: str
     visit_date: Optional[str] = None
@@ -92,6 +97,11 @@ class ReferralContactInfo(BaseModel):
 class ReferContactItem(BaseModel):
     name: str
     email: EmailStr
+
+
+class PayoutTermsAcceptRequest(BaseModel):
+    # The e-signature: a typed full legal name, recorded with the stamp.
+    legal_name: str = Field(min_length=3, max_length=150)
 
 
 class RSVPReferRequest(BaseModel):

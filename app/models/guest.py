@@ -131,6 +131,10 @@ class Guest(Base):
     # 0051: the referrer accepted the Referral Outreach Policy — gates
     # /refer (platform SMTP carrying their words); stamped once.
     outreach_terms_accepted_at = Column(DateTime(timezone=True), nullable=True)
+    # 0052: the payout-terms acceptance WALL — checkbox + typed full
+    # legal name before codes/links/portal tabs exist for the referrer.
+    payout_terms_accepted_at = Column(DateTime(timezone=True), nullable=True)
+    payout_terms_legal_name = Column(String, nullable=True)
     # Choose-within-caps (0039): the TOTAL tickets this guest may take
     # when it's less than the sum of their per-day grants — the grants
     # become ceilings and the RSVP page lets them choose where to spend.

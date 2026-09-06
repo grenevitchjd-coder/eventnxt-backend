@@ -34,6 +34,8 @@ from fastapi.testclient import TestClient
 
 import app.services.email as email_mod
 from app.main import app
+from app.database import SessionLocal
+from app.models.guest import Guest
 from app.services.deps import get_current_user
 from app.services.event_access import require_event_access
 
@@ -108,8 +110,43 @@ def main():
                json={"guest_id": ivy["id"], "code": "IVY15", "reward_type": "percentage",
                      "reward_value": 15, "discount_type": "percentage", "discount_value": 10}, headers=H)
     check("code attaches to the referrer", r.status_code == 201, f"{r.status_code} {r.text[:150]}")
+    print("== 3a. the payout-terms wall (0052) ==")
     r = c.get(f"/public/rsvp/{ivy['rsvp_token']}")
     check("public rsvp info survives a typeless guest", r.status_code == 200, f"{r.status_code} {r.text[:150]}")
+    walled = r.json() if r.status_code == 200 else {}
+    check("codes WITHHELD before the wall is signed",
+          walled.get("payout_terms_required") is True and walled.get("referral_codes") == [],
+          str((walled.get("payout_terms_required"), walled.get("referral_codes"))))
+    r = c.post(f"/public/rsvp/{ivy['rsvp_token']}/accept-payout-terms", json={"legal_name": "Ivy"})
+    check("a single name is refused — full legal name required", r.status_code == 400, f"{r.status_code}")
+    SENT.clear()
+    r = c.post(f"/events/{EV}/referrers/{ivy['id']}/send-portal-link",
+               json={"portal_base_url": "https://x.test"}, headers=H)
+    check("pre-signature portal email sends", r.status_code == 200, f"{r.status_code} {r.text[:120]}")
+    check("...and carries NO code, only the accept prompt",
+          "IVY15" not in SENT[-1]["text"] and "accept" in SENT[-1]["text"].lower()
+          and "Action needed" in SENT[-1]["subject"], SENT[-1]["text"][:200])
+    r = c.post(f"/public/rsvp/{ivy['rsvp_token']}/refer",
+               json={"promo_code_id": "x", "contacts": [], "outreach_terms_accepted": True})
+    check("refer refused behind the wall", r.status_code == 400 and "Referral Program Terms" in r.json()["detail"],
+          r.text[:120])
+    r = c.post(f"/public/rsvp/{ivy['rsvp_token']}/accept-payout-terms", json={"legal_name": "  Ivy   Q.  Influencer "})
+    check("signing the wall returns the portal payload with codes", r.status_code == 200
+          and any(rc.get("code") == "IVY15" for rc in r.json().get("referral_codes", [])), r.text[:200])
+    check("signature stamped + name normalized",
+          r.json().get("payout_terms_accepted_at") is not None and r.json().get("payout_terms_required") is False)
+    db = SessionLocal()
+    try:
+        g = db.query(Guest).filter(Guest.id == ivy["id"]).first()
+        check("legal name recorded", g.payout_terms_legal_name == "Ivy Q. Influencer", g.payout_terms_legal_name)
+    finally:
+        db.close()
+    SENT.clear()
+    c.post(f"/events/{EV}/referrers/{ivy['id']}/send-portal-link",
+           json={"portal_base_url": "https://x.test"}, headers=H)
+    check("post-signature portal email carries the code again", "IVY15" in SENT[-1]["text"], SENT[-1]["text"][:200])
+
+    r = c.get(f"/public/rsvp/{ivy['rsvp_token']}")
     info = r.json() if r.status_code == 200 else {}
     check("info carries the referral code",
           any(rc.get("code") == "IVY15" for rc in info.get("referral_codes", [])),

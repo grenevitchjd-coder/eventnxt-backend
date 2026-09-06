@@ -381,6 +381,31 @@ def send_referrer_portal_link(
     profile = db.query(EventProfile).filter(EventProfile.event_id == event_id).first()
     event_name = (profile.title if profile else None) or "the event"
 
+    # 0052: NOTHING referral-facing ships before the payout-terms wall is
+    # signed — the pre-signature email carries no codes or share links,
+    # only the portal link (the door to the wall).
+    if guest.payout_terms_accepted_at is None:
+        text = "\n".join([
+            f"Hi {guest.name},",
+            "",
+            f"You've been invited to be a referrer for {event_name}.",
+            "",
+            "Before you receive your unique referral code and share link, please",
+            "review and accept the Referral Program Terms (your payout terms and",
+            "the outreach rules) — it takes a minute:",
+            "",
+            f"  {portal_link}",
+            "",
+            "Once you've accepted, your code, share link, and live sales tracking",
+            "unlock right there.",
+            f"Full terms: {base}/terms/referral",
+        ])
+        try:
+            email_service.send_email(to=guest.email, subject=f"Action needed: accept your referral terms for {event_name}", text_body=text)
+        except Exception:
+            raise HTTPException(status_code=400, detail="Email didn't send — check the event's email settings (SMTP) and the address.")
+        return {"sent": True}
+
     lines = [f"Hi {guest.name},", "", f"You're set up as a referrer for {event_name}. Your code(s):", ""]
     for code in codes:
         deal = []

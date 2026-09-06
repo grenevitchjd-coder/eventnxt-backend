@@ -13,6 +13,7 @@ from app.models.promo_code import PromoCode, RewardType
 from app.models.reward_redemption import RewardRedemption
 from app.models.guest_ticket_request import GuestTicketRequest
 from app.schemas.rsvp import (
+    PayoutTermsAcceptRequest,
     DealBonusTier,
     DealPointsRate,
     ReferralContactInfo,
@@ -52,6 +53,27 @@ def _get_guest_by_token_or_404(db: Session, token: str) -> Guest:
     if not guest:
         raise HTTPException(status_code=404, detail="That RSVP link isn't valid.")
     return guest
+
+
+def _payout_terms_pending(db: Session, guest: Guest) -> bool:
+    """0052: this guest holds referral codes but hasn't signed the
+    payout-terms wall. While True, the payload withholds their codes
+    and /refer + /redeem refuse — nothing referral-facing exists."""
+    if guest.payout_terms_accepted_at is not None:
+        return False
+    return (
+        db.query(PromoCode.id)
+        .filter(PromoCode.guest_id == guest.id)
+        .first()
+        is not None
+    )
+
+
+def _referral_codes_if_signed(db: Session, guest: Guest):
+    """(codes, payout_terms_required) — WITHHELD until the wall is signed."""
+    if _payout_terms_pending(db, guest):
+        return [], True
+    return _build_referral_codes(db, str(guest.event_id), str(guest.id)), False
 
 
 def _build_referral_codes(db: Session, event_id: str, guest_id: str):
@@ -167,7 +189,10 @@ def _build_referral_codes(db: Session, event_id: str, guest_id: str):
 def _guest_extras(db: Session, guest: Guest, allotment: dict) -> dict:
     """The mode/needs-seating/ticket fields both RSVPInfoResponse shapes share."""
     codes = [t.code for t in comp_tickets.valid_comp_tickets(db, guest)]
-    extras_outreach = {"outreach_terms_accepted_at": guest.outreach_terms_accepted_at}  # 0051
+    extras_outreach = {
+        "outreach_terms_accepted_at": guest.outreach_terms_accepted_at,  # 0051
+        "payout_terms_accepted_at": guest.payout_terms_accepted_at,  # 0052
+    }
     latest_req = (
         db.query(GuestTicketRequest)
         .filter(GuestTicketRequest.guest_id == guest.id)
@@ -217,7 +242,8 @@ def get_rsvp_info(token: str, db: Session = Depends(get_db)):
             visit_date=guest.visit_date,
             party_size=guest.party_size,
             is_allotment_holder=False,
-            referral_codes=_build_referral_codes(db, str(guest.event_id), str(guest.id)),
+            referral_codes=_referral_codes_if_signed(db, guest)[0],
+            payout_terms_required=_referral_codes_if_signed(db, guest)[1],
             **_guest_extras(db, guest, allotment),
         )
 
@@ -258,7 +284,8 @@ def get_rsvp_info(token: str, db: Session = Depends(get_db)):
             )
             for c in children
         ],
-        referral_codes=_build_referral_codes(db, str(guest.event_id), str(guest.id)),
+        referral_codes=_referral_codes_if_signed(db, guest)[0],
+        payout_terms_required=_referral_codes_if_signed(db, guest)[1],
         **_guest_extras(db, guest, allotment),
     )
 
@@ -607,6 +634,26 @@ def remove_distributed_recipient(token: str, child_id: str, db: Session = Depend
     return get_rsvp_info(token, db)
 
 
+@router.post("/public/rsvp/{token}/accept-payout-terms", response_model=RSVPInfoResponse)
+def accept_payout_terms(token: str, payload: PayoutTermsAcceptRequest, db: Session = Depends(get_db)):
+    """
+    0052: the payout-terms wall's submit — checkbox is client-side; what
+    the server requires and RECORDS is the typed full legal name (the
+    e-signature) plus the timestamp. COMMITTED immediately (acceptance
+    is its own fact — 0051 lesson) and idempotent: re-signing updates
+    nothing once stamped. The refreshed payload now includes the codes.
+    """
+    guest = _get_guest_by_token_or_404(db, token)
+    name = " ".join(payload.legal_name.split())
+    if len(name) < 3 or " " not in name:
+        raise HTTPException(status_code=400, detail="Please enter your full legal name (first and last).")
+    if guest.payout_terms_accepted_at is None:
+        guest.payout_terms_accepted_at = datetime.now(timezone.utc)
+        guest.payout_terms_legal_name = name
+        db.commit()
+    return get_rsvp_info(token, db)
+
+
 @router.post("/public/rsvp/{token}/refer", response_model=RSVPInfoResponse)
 def refer_people(token: str, payload: RSVPReferRequest, db: Session = Depends(get_db)):
     """
@@ -622,6 +669,8 @@ def refer_people(token: str, payload: RSVPReferRequest, db: Session = Depends(ge
     page: without a slug there is nothing to link to.
     """
     guest = _get_guest_by_token_or_404(db, token)
+    if _payout_terms_pending(db, guest):
+        raise HTTPException(status_code=400, detail="Accept the Referral Program Terms first.")
     # 0051: the Referral Outreach Policy gates EVERYTHING here — this
     # endpoint pipes referrer-written words through the platform's own
     # SMTP, so acceptance is enforced FIRST (before publish or code
@@ -706,6 +755,8 @@ def redeem_reward(token: str, payload: RSVPRedeemRequest, db: Session = Depends(
     could redeem against a code that isn't the caller's own.
     """
     guest = _get_guest_by_token_or_404(db, token)
+    if _payout_terms_pending(db, guest):
+        raise HTTPException(status_code=400, detail="Accept the Referral Program Terms first.")
 
     code = db.query(PromoCode).filter(PromoCode.id == payload.promo_code_id).first()
     if not code or str(code.guest_id) != str(guest.id):
