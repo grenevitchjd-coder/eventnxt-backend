@@ -10,11 +10,17 @@
 #      - unreleased reserve  -> app fee KEPT (reserve absorbs the cost)
 #      - released reserve    -> app fee returned (platform eats it)
 #      - zero-reserve legacy -> app fee returned (pre-0047 behavior)
-#   4. THE CANCELLATION LEDGER — the formula slice B's release endpoint
-#      will pay out: SUM(reserve) OVER STILL-PAID ORDERS. Refund one of
-#      three and the sum is exactly the two kept reserves; refund all
-#      (event cancelled) and the sum is zero — the organizer bears every
+#   4. THE CANCELLATION LEDGER — the formula the release endpoint pays
+#      out: SUM(reserve) OVER STILL-PAID ORDERS. Refund one of three and
+#      the sum is exactly the two kept reserves; refund all (event
+#      cancelled) and the sum is zero — the organizer bears every
 #      refund's processing cost by non-payment, never by a debit.
+#   5. RELEASE (slice B): refused before the event's last day; after it,
+#      one transfer of the still-paid sum with a deterministic
+#      idempotency key, rows stamped released; earnings reports
+#      held / released / used (used = refunded AND never released — a
+#      refund AFTER release is excluded, that cost fell on the
+#      platform); a second release finds nothing.
 #
 # Run: DATABASE_URL="postgresql://test@/eventnxt_test?host=/tmp&port=5433" python3 test/test_reserve.py
 import os
@@ -41,6 +47,7 @@ from app.services.deps import get_current_user
 from app.services.event_access import require_event_access
 import app.routers.checkout as checkout_router
 import app.routers.orders_admin as orders_admin_router
+import app.services.stripe_gateway as gateway
 
 email_mod.send_email = lambda **kw: None
 
@@ -187,6 +194,38 @@ def main():
     check("one kept order -> one reserve in the sum", paid_reserve_sum() == 146, paid_reserve_sum())
     r = c.post(f"/events/{EV}/orders/{ids[2]}/refund", headers=H)
     check("full cancellation -> release sum is ZERO", r.status_code == 200 and paid_reserve_sum() == 0, paid_reserve_sum())
+
+    print("6) release: refused while the event isn't over")
+    r = c.post(f"/events/{EV}/payments/release-reserve", headers=H)
+    check("400 before the last day", r.status_code == 400 and "last day" in r.json()["detail"], r.text[:140])
+    e = c.get(f"/events/{EV}/payments/earnings").json()
+    check("not releasable while event runs", e["reserve_releasable"] is False, str(e))
+
+    print("7) release after the event: transfer + stamps + honest earnings")
+    class UOver(U):
+        event_data = {"organization_id": ORG, "name": "Reserve", "start_date": "2026-01-02", "end_date": "2026-01-03"}
+    app.dependency_overrides[require_event_access] = lambda event_id: UOver()
+    # two fresh kept sales to have something to release (146 each)
+    for i in range(2):
+        buy(f"keep{i}@x.com", qty=2)
+        mark_paid(f"keep{i}@x.com", f"pi_keep{i}")
+    transfers = []
+    gateway.create_transfer = lambda acct, amount, currency, description, idempotency_key: (
+        transfers.append({"acct": acct, "amount": amount, "key": idempotency_key}) or {"id": "tr_test"}
+    )
+    e = c.get(f"/events/{EV}/payments/earnings").json()
+    check("now releasable (event over, held > 0)", e["reserve_releasable"] is True and e["reserve_held_cents"] == 292, str(e))
+    r = c.post(f"/events/{EV}/payments/release-reserve", headers=H)
+    check("release 200: sum of the two kept reserves", r.status_code == 200 and r.json() == {"released_cents": 292, "orders_count": 2}, r.text[:140])
+    check("one Stripe transfer to the org account", len(transfers) == 1 and transfers[0]["acct"] == ACCT and transfers[0]["amount"] == 292, str(transfers))
+    check("idempotency key is deterministic on the pending set", transfers[0]["key"] == f"reserve-release-{EV}-292-2", str(transfers))
+    e = c.get(f"/events/{EV}/payments/earnings").json()
+    check("earnings: held 0, released 292", e["reserve_held_cents"] == 0 and e["reserve_released_cents"] == 292, str(e))
+    check("used = refunded-and-never-released reserves only (dest0 + dest2, not released-then-refunded dest1)",
+          e["reserve_used_cents"] == 292, str(e))
+    check("no longer releasable", e["reserve_releasable"] is False, str(e))
+    r = c.post(f"/events/{EV}/payments/release-reserve", headers=H)
+    check("second release: nothing to release", r.status_code == 400 and "Nothing to release" in r.json()["detail"], r.text[:140])
 
     # ---- cleanup ----
     db = SessionLocal()

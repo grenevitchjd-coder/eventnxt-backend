@@ -191,3 +191,19 @@ def list_payouts(stripe_account_id: str, limit: int = 10):
     """The connected account's most recent bank payouts, newest first."""
     _client()
     return stripe.Payout.list(stripe_account=stripe_account_id, limit=limit)
+
+
+def create_transfer(stripe_account_id: str, amount_cents: int, currency: str, description: str, idempotency_key: str):
+    """
+    A plain platform->connected transfer, used for the post-event reserve
+    release. The idempotency key makes a retry after a lost response safe:
+    same pending set -> same key -> Stripe dedupes instead of double-paying.
+    """
+    _client()
+    return stripe.Transfer.create(
+        amount=amount_cents,
+        currency=currency,
+        destination=stripe_account_id,
+        description=description,
+        idempotency_key=idempotency_key,
+    )

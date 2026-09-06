@@ -36,6 +36,21 @@ class EarningsResponse(BaseModel):
     refunded_cents: int  # charged-then-returned
     paid_orders: int
     refunded_orders: int
+    # Refund-cost reserve (0047): held = still-paid orders' unreleased
+    # reserves (custody: platform, destiny: organizer); released = paid
+    # out post-event; used = reserves of refunded orders that covered
+    # those refunds' processing costs and will never release.
+    reserve_held_cents: int = 0
+    reserve_released_cents: int = 0
+    reserve_used_cents: int = 0
+    # True when the Release button should render: event over, something
+    # held, payout account enabled.
+    reserve_releasable: bool = False
+
+
+class ReserveReleaseResponse(BaseModel):
+    released_cents: int
+    orders_count: int
 
 
 class PayoutItem(BaseModel):

@@ -28,7 +28,9 @@ import stripe as stripe_lib
 
 from app.config import settings
 from app.database import get_db
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
+
+from dateutil import parser as date_parser
 
 from sqlalchemy import func
 
@@ -41,6 +43,7 @@ from app.schemas.payments import (
     PaymentLinkResponse,
     PayoutItem,
     PayoutsResponse,
+    ReserveReleaseResponse,
 )
 from app.services import stripe_gateway as gateway
 from app.services.deps import CurrentUser
@@ -174,6 +177,16 @@ def event_earnings(
     paid = sums(OrderStatus.PAID)
     refunded = sums(OrderStatus.REFUNDED)
     currency_row = db.query(Order.currency).filter(Order.event_id == event_id).first()
+
+    def reserve_sum(status, released):
+        q = db.query(func.coalesce(func.sum(Order.reserve_cents), 0)).filter(
+            Order.event_id == event_id, Order.status == status, Order.reserve_cents > 0
+        )
+        q = q.filter(Order.reserve_released_at.isnot(None) if released else Order.reserve_released_at.is_(None))
+        return int(q.scalar())
+
+    held = reserve_sum(OrderStatus.PAID, released=False)
+    account = _org_account(db, user.organization_id)
     return EarningsResponse(
         currency=(currency_row[0] if currency_row else "usd"),
         gross_sold_cents=paid["gross"],
@@ -182,7 +195,97 @@ def event_earnings(
         refunded_cents=refunded["gross"],
         paid_orders=paid["count"],
         refunded_orders=refunded["count"],
+        reserve_held_cents=held,
+        reserve_released_cents=reserve_sum(OrderStatus.PAID, released=True),
+        # refunded + never released = the reserves that covered those
+        # refunds' processing costs
+        reserve_used_cents=reserve_sum(OrderStatus.REFUNDED, released=False),
+        reserve_releasable=(
+            held > 0
+            and _event_over(user)
+            and account is not None
+            and account.charges_enabled
+        ),
     )
+
+
+def _event_over(user: CurrentUser) -> bool:
+    """
+    The release gate: strictly after the event's last day, read from the
+    same Events360 payload the settings router trusts (its dates are
+    authoritative there too). Unknown dates -> NOT over: releasing money
+    early is the harmful direction, so the gate fails closed and the
+    error tells the organizer to set dates in Events360.
+    """
+    data = getattr(user, "event_data", None) or {}
+    try:
+        last = date_parser.isoparse(data["end_date"]).date() if data.get("end_date") else None
+    except (ValueError, TypeError):
+        last = None
+    return last is not None and date.today() > last
+
+
+@router.post("/events/{event_id}/payments/release-reserve", response_model=ReserveReleaseResponse)
+def release_reserve(
+    event_id: str,
+    user: CurrentUser = Depends(require_event_access),
+    db: Session = Depends(get_db),
+):
+    """
+    THE payout of the reserve scheme: one transfer of SUM(reserve) OVER
+    STILL-PAID, UNRELEASED orders to the org's connected account, then
+    stamp those rows released. Refunded orders' reserves are simply not
+    in the sum — that's the organizer bearing refund processing costs,
+    by non-payment rather than a debit.
+
+    Ordering: rows are locked FOR UPDATE, the Stripe transfer goes FIRST,
+    the stamps commit after. A lost response between the two is healed by
+    the idempotency key (same pending set -> same sum and count -> same
+    key -> Stripe dedupes the retry). Stamping first would risk the
+    opposite failure — reserves marked released that were never paid.
+    """
+    if not _event_over(user):
+        raise HTTPException(
+            status_code=400,
+            detail="The reserve releases after the event's last day. If the event is over, check its dates in Events360.",
+        )
+    account = _org_account(db, user.organization_id)
+    if not account or not account.charges_enabled:
+        raise HTTPException(status_code=400, detail="Finish connecting payouts first.")
+
+    rows = (
+        db.query(Order)
+        .filter(
+            Order.event_id == event_id,
+            Order.status == OrderStatus.PAID,
+            Order.reserve_cents > 0,
+            Order.reserve_released_at.is_(None),
+        )
+        .with_for_update()
+        .all()
+    )
+    total = sum(o.reserve_cents for o in rows)
+    if total <= 0:
+        raise HTTPException(status_code=400, detail="Nothing to release — no held reserve on this event.")
+
+    currency = rows[0].currency or "usd"
+    try:
+        gateway.create_transfer(
+            account.stripe_account_id,
+            total,
+            currency,
+            description=f"EventNXT reserve release — event {event_id}",
+            idempotency_key=f"reserve-release-{event_id}-{total}-{len(rows)}",
+        )
+    except stripe_lib.error.StripeError:
+        db.rollback()
+        raise HTTPException(status_code=502, detail="Stripe couldn't send the release. Try again in a moment.")
+
+    now = datetime.now(timezone.utc)
+    for o in rows:
+        o.reserve_released_at = now
+    db.commit()
+    return ReserveReleaseResponse(released_cents=total, orders_count=len(rows))
 
 
 @router.get("/events/{event_id}/payments/payouts", response_model=PayoutsResponse)
