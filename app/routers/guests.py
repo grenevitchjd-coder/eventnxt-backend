@@ -66,6 +66,7 @@ def _serialize_guest(db: Session, guest: Guest) -> GuestResponse:
         name=guest.name,
         email=guest.email,
         guest_type_id=guest.guest_type_id,
+        is_referrer_only=guest.is_referrer_only,
         seating_category_id=guest.seating_category_id,
         section_label=guest.section_label,
         allocation_status=guest.allocation_status.value,
@@ -691,7 +692,7 @@ def guest_door_roster(
 
     guests = (
         db.query(Guest)
-        .filter(Guest.event_id == event_id)
+        .filter(Guest.event_id == event_id, Guest.is_referrer_only.is_(False))
         .order_by(Guest.name)
         .all()
     )
@@ -756,6 +757,8 @@ def send_guest_invite(
     guest = db.query(Guest).filter(Guest.id == guest_id, Guest.event_id == event_id).first()
     if not guest:
         raise HTTPException(status_code=404, detail="Guest not found.")
+    if guest.is_referrer_only:
+        raise HTTPException(status_code=400, detail="This person is a referrer, not an invitee — their link lives on Referral setup.")
     link = payload.rsvp_base_url.rstrip("/") + "/rsvp/" + guest.rsvp_token
     if comp_tickets.send_invite_email(db, guest, link):
         guest.link_sent_at = datetime.now(timezone.utc)
@@ -785,7 +788,11 @@ def send_guest_invites_bulk(
     success and skips on failure; returns {sent, failed} so the
     organizer knows exactly where things stand.
     """
-    q = db.query(Guest).filter(Guest.event_id == event_id, Guest.allocated_by_guest_id.is_(None))
+    q = db.query(Guest).filter(
+        Guest.event_id == event_id,
+        Guest.allocated_by_guest_id.is_(None),
+        Guest.is_referrer_only.is_(False),  # referrers are Referral setup's people
+    )
     if payload.guest_ids:
         q = q.filter(Guest.id.in_(payload.guest_ids))
     else:
@@ -817,7 +824,11 @@ def send_portal_links_bulk(
     explicit ids given. Mirrors /send-invites, holders-only — the two
     pages never email each other's people.
     """
-    q = db.query(Guest).filter(Guest.event_id == event_id, Guest.allocated_by_guest_id.is_(None))
+    q = db.query(Guest).filter(
+        Guest.event_id == event_id,
+        Guest.allocated_by_guest_id.is_(None),
+        Guest.is_referrer_only.is_(False),  # referrers are Referral setup's people
+    )
     if payload.guest_ids:
         q = q.filter(Guest.id.in_(payload.guest_ids))
     else:

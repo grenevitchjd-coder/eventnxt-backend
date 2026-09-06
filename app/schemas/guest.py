@@ -54,7 +54,8 @@ class GuestResponse(BaseModel):
     event_id: uuid.UUID
     name: str
     email: str
-    guest_type_id: uuid.UUID
+    guest_type_id: Optional[uuid.UUID] = None  # None = referrer-only guest (0043)
+    is_referrer_only: bool = False
     seating_category_id: Optional[uuid.UUID] = None
     section_label: Optional[str] = None
     recipient_seating_category_id: Optional[uuid.UUID] = None

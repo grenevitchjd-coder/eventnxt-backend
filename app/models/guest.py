@@ -57,7 +57,11 @@ class Guest(Base):
     name = Column(String, nullable=False)
     email = Column(String, nullable=False, index=True)
 
-    guest_type_id = Column(UUID(as_uuid=True), ForeignKey("guest_types.id"), nullable=False)
+    guest_type_id = Column(UUID(as_uuid=True), ForeignKey("guest_types.id"), nullable=True)  # NULL only for referrer-only guests (0043)
+    # True = created from Referral Setup purely to hold promo codes:
+    # excluded from Invites/Allotments emailing, minting, and the door
+    # roster. A guest who both attends and refers stays False.
+    is_referrer_only = Column(Boolean, nullable=False, default=False, server_default="false")
     # Nullable: a guest type may have no seating category assigned yet.
     seating_category_id = Column(UUID(as_uuid=True), ForeignKey("seating_categories.id"), nullable=True)
     # Which section within their pool this comp guest was placed in

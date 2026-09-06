@@ -30,7 +30,7 @@ class RSVPInfoResponse(BaseModel):
     """
 
     guest_name: str
-    guest_type_name: str
+    guest_type_name: Optional[str] = None  # None for referrer-only guests
     allocation_status: str
     visit_date: Optional[str] = None
     party_size: int

@@ -142,7 +142,7 @@ def get_rsvp_info(token: str, db: Session = Depends(get_db)):
     if mode != "distribute":
         return RSVPInfoResponse(
             guest_name=guest.name,
-            guest_type_name=guest_type.name,
+            guest_type_name=guest_type.name if guest_type else None,
             allocation_status=guest.allocation_status.value,
             visit_date=guest.visit_date,
             party_size=guest.party_size,
@@ -169,7 +169,7 @@ def get_rsvp_info(token: str, db: Session = Depends(get_db)):
 
     return RSVPInfoResponse(
         guest_name=guest.name,
-        guest_type_name=guest_type.name,
+        guest_type_name=guest_type.name if guest_type else None,
         allocation_status=guest.allocation_status.value,
         visit_date=guest.visit_date,
         party_size=guest.party_size,

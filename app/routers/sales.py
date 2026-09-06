@@ -1,10 +1,14 @@
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel, EmailStr
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.database import get_db
+import secrets
+
+from app.models.event_profile import EventProfile
 from app.models.guest import Guest
 from app.models.bonus_award import BonusAward
 from app.models.event_bonus_tier import EventBonusTier
@@ -42,6 +46,7 @@ from app.schemas.sales import (
 from app.services import bonuses as bonuses_service
 from app.services import redemptions as redemptions_service
 from app.services import sales as sales_service
+from app.services import email as email_service
 from app.services.deps import CurrentUser
 from app.services.event_access import require_event_access
 
@@ -275,6 +280,123 @@ def delete_promo_code(
     db.query(PromoCodeBonusTier).filter(PromoCodeBonusTier.promo_code_id == code_id).delete()
     db.delete(code)
     db.commit()
+
+
+# ---------- Referrers (Referral Setup page) ----------
+
+
+class ReferrerCreateRequest(BaseModel):
+    name: str
+    email: EmailStr
+
+
+class ReferrerResponse(BaseModel):
+    id: uuid.UUID
+    name: str
+    email: str
+    rsvp_token: str
+    is_referrer_only: bool
+
+
+class SendReferrerPortalLinkRequest(BaseModel):
+    portal_base_url: str  # frontend origin — link = {base}/referrer/{token}
+
+
+@router.post("/referrers", response_model=ReferrerResponse, status_code=201)
+def create_referrer(
+    event_id: str,
+    payload: ReferrerCreateRequest,
+    db: Session = Depends(get_db),
+    user: CurrentUser = Depends(require_event_access),
+):
+    """
+    A referral person from scratch — an influencer or salesperson who
+    may never attend. Still a Guest row (referrers always were), but
+    is_referrer_only fences them out of every attendee flow: no offering
+    type, no grants, nothing mints, no invite emails, absent from the
+    door roster. Their deal is the promo code(s) attached next.
+    """
+    existing = (
+        db.query(Guest)
+        .filter(Guest.event_id == event_id, Guest.email.ilike(payload.email))
+        .first()
+    )
+    if existing:
+        # An attendee can also refer — codes just attach to their
+        # existing row. Only a same-email REFERRER row is a duplicate.
+        if existing.is_referrer_only:
+            raise HTTPException(status_code=400, detail=f'"{payload.email}" is already a referrer for this event.')
+        return ReferrerResponse(
+            id=existing.id, name=existing.name, email=existing.email,
+            rsvp_token=existing.rsvp_token, is_referrer_only=False,
+        )
+    guest = Guest(
+        event_id=event_id,
+        name=payload.name,
+        email=payload.email,
+        guest_type_id=None,
+        is_referrer_only=True,
+        rsvp_token=secrets.token_urlsafe(24),
+    )
+    db.add(guest)
+    db.commit()
+    db.refresh(guest)
+    return ReferrerResponse(
+        id=guest.id, name=guest.name, email=guest.email,
+        rsvp_token=guest.rsvp_token, is_referrer_only=True,
+    )
+
+
+@router.post("/referrers/{guest_id}/send-portal-link")
+def send_referrer_portal_link(
+    event_id: str,
+    guest_id: str,
+    payload: SendReferrerPortalLinkRequest,
+    db: Session = Depends(get_db),
+    user: CurrentUser = Depends(require_event_access),
+):
+    """
+    Email a referrer their portal link (dashboard + reward claiming) and
+    every share link they hold. Fired automatically by Referral Setup
+    the moment a person is added with their first code, and available
+    per-row for re-sends. Works for attendee-referrers too — the portal
+    shows the referral side of whoever holds the token.
+    """
+    guest = db.query(Guest).filter(Guest.id == guest_id, Guest.event_id == event_id).first()
+    if not guest:
+        raise HTTPException(status_code=404, detail="Referrer not found.")
+    codes = db.query(PromoCode).filter(PromoCode.event_id == event_id, PromoCode.guest_id == guest.id).all()
+    if not codes:
+        raise HTTPException(status_code=400, detail="Add this person's promo code first — the email includes their share links.")
+
+    base = payload.portal_base_url.rstrip("/")
+    portal_link = f"{base}/referrer/{guest.rsvp_token}"
+    profile = db.query(EventProfile).filter(EventProfile.event_id == event_id).first()
+    event_name = (profile.title if profile else None) or "the event"
+
+    lines = [f"Hi {guest.name},", "", f"You're set up as a referrer for {event_name}. Your code(s):", ""]
+    for code in codes:
+        deal = []
+        if code.discount_type == "percentage":
+            deal.append(f"buyers get {code.discount_value}% off")
+        elif code.discount_type == "flat_amount":
+            deal.append(f"buyers get ${code.discount_value} off")
+        line = f"  {code.code}" + (f" — {', '.join(deal)}" if deal else "")
+        lines.append(line)
+        if profile and profile.is_published:
+            lines.append(f"  Share link: {base}/e/{profile.slug}?ref={code.code}")
+        lines.append("")
+    if not (profile and profile.is_published):
+        lines.append("(Share links will be in your portal once the event page is published.)")
+        lines.append("")
+    lines.append(f"Track your sales and claim rewards any time: {portal_link}")
+    text = "\n".join(lines)
+
+    try:
+        email_service.send_email(to=guest.email, subject=f"Your referral link for {event_name}", text_body=text)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Email didn't send — check the event's email settings (SMTP) and the address.")
+    return {"sent": True}
 
 
 # ---------- Sales ----------
