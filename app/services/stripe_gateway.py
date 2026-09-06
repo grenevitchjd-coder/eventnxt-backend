@@ -172,3 +172,15 @@ def construct_connect_webhook_event(payload: bytes, signature_header: str):
             "STRIPE_CONNECT_WEBHOOK_SECRET is not set — refusing all Connect webhooks (fail closed)."
         )
     return stripe.Webhook.construct_event(payload, signature_header, settings.stripe_connect_webhook_secret)
+
+
+def retrieve_balance(stripe_account_id: str):
+    """The connected account's live balance (available vs pending)."""
+    _client()
+    return stripe.Balance.retrieve(stripe_account=stripe_account_id)
+
+
+def list_payouts(stripe_account_id: str, limit: int = 10):
+    """The connected account's most recent bank payouts, newest first."""
+    _client()
+    return stripe.Payout.list(stripe_account=stripe_account_id, limit=limit)

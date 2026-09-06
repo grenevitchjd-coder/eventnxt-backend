@@ -19,3 +19,42 @@ class PaymentLinkResponse(BaseModel):
     """A one-time Stripe URL (onboarding Account Link or Express login link)."""
 
     url: str
+
+
+class EarningsResponse(BaseModel):
+    """
+    THIS EVENT's native-ticketing money, summed from the order snapshots
+    (the same frozen numbers the ledger will one day reconcile against).
+    Externally-sold (CSV-imported) revenue is deliberately absent — that
+    money never touched EventNXT.
+    """
+
+    currency: str
+    gross_sold_cents: int  # charged on currently-paid orders
+    platform_fees_cents: int  # kept fees (refunded orders' fees are returned)
+    organizer_net_cents: int  # gross minus fees, paid orders only
+    refunded_cents: int  # charged-then-returned
+    paid_orders: int
+    refunded_orders: int
+
+
+class PayoutItem(BaseModel):
+    amount_cents: int
+    currency: str
+    status: str  # paid / pending / in_transit / canceled / failed
+    arrival_date: str  # ISO date
+
+
+class PayoutsResponse(BaseModel):
+    """
+    ORG-scoped live numbers straight from Stripe: what's waiting out the
+    7-day delay (pending), what's cleared for the next payout run
+    (available), and the recent payout runs themselves. connected=False
+    means no enabled account — everything else empty; never an error.
+    """
+
+    connected: bool
+    balance_available_cents: int = 0
+    balance_pending_cents: int = 0
+    currency: str = "usd"
+    payouts: list[PayoutItem] = []

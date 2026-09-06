@@ -28,9 +28,20 @@ import stripe as stripe_lib
 
 from app.config import settings
 from app.database import get_db
+from datetime import datetime, timezone
+
+from sqlalchemy import func
+
+from app.models.order import Order, OrderStatus
 from app.models.payment_account import PaymentAccount
 from app.models.stripe_webhook_event import StripeWebhookEvent
-from app.schemas.payments import PaymentAccountStatus, PaymentLinkResponse
+from app.schemas.payments import (
+    EarningsResponse,
+    PaymentAccountStatus,
+    PaymentLinkResponse,
+    PayoutItem,
+    PayoutsResponse,
+)
 from app.services import stripe_gateway as gateway
 from app.services.deps import CurrentUser
 from app.services.event_access import require_event_access
@@ -130,6 +141,91 @@ def manage_payments_link(
     except stripe_lib.error.StripeError:
         raise HTTPException(status_code=502, detail="Stripe couldn't open the payouts dashboard. Try again in a moment.")
     return PaymentLinkResponse(url=link["url"])
+
+
+@router.get("/events/{event_id}/payments/earnings", response_model=EarningsResponse)
+def event_earnings(
+    event_id: str,
+    user: CurrentUser = Depends(require_event_access),
+    db: Session = Depends(get_db),
+):
+    """
+    This event's native money, from the orders table's frozen snapshots —
+    works with or without a connected account (platform-fallback-era
+    sales count the same). Fee policy is visible in the shape: refunded
+    orders keep their gross in refunded_cents but contribute NOTHING to
+    platform_fees_cents or organizer_net_cents (no platform fee on
+    refunded tickets — the fee snapshot on those rows records what WAS
+    charged, not what was kept).
+    """
+    def sums(status):
+        row = (
+            db.query(
+                func.coalesce(func.sum(Order.subtotal_cents - Order.discount_cents), 0),
+                func.coalesce(func.sum(Order.platform_fee_cents), 0),
+                func.coalesce(func.sum(Order.organizer_net_cents), 0),
+                func.count(Order.id),
+            )
+            .filter(Order.event_id == event_id, Order.status == status)
+            .one()
+        )
+        return {"gross": int(row[0]), "fees": int(row[1]), "net": int(row[2]), "count": int(row[3])}
+
+    paid = sums(OrderStatus.PAID)
+    refunded = sums(OrderStatus.REFUNDED)
+    currency_row = db.query(Order.currency).filter(Order.event_id == event_id).first()
+    return EarningsResponse(
+        currency=(currency_row[0] if currency_row else "usd"),
+        gross_sold_cents=paid["gross"],
+        platform_fees_cents=paid["fees"],
+        organizer_net_cents=paid["net"],
+        refunded_cents=refunded["gross"],
+        paid_orders=paid["count"],
+        refunded_orders=refunded["count"],
+    )
+
+
+@router.get("/events/{event_id}/payments/payouts", response_model=PayoutsResponse)
+def payout_summary(
+    event_id: str,
+    user: CurrentUser = Depends(require_event_access),
+    db: Session = Depends(get_db),
+):
+    """
+    The org's live money at Stripe: pending (waiting out the 7-day
+    delay), available (cleared for the next payout run), and recent
+    payouts. No enabled account is a NORMAL state, not an error —
+    connected=False and empty numbers, so the Orders page renders the
+    same panel code everywhere.
+    """
+    account = _org_account(db, user.organization_id)
+    if not account or not account.charges_enabled:
+        return PayoutsResponse(connected=False)
+
+    def cents(entries):
+        return sum(int(e.get("amount", 0)) for e in entries if e.get("currency", "usd") == "usd")
+
+    try:
+        balance = gateway.retrieve_balance(account.stripe_account_id)
+        payouts = gateway.list_payouts(account.stripe_account_id, limit=10)
+    except stripe_lib.error.StripeError:
+        raise HTTPException(status_code=502, detail="Stripe couldn't report the balance. Try again in a moment.")
+
+    return PayoutsResponse(
+        connected=True,
+        balance_available_cents=cents(balance.get("available", [])),
+        balance_pending_cents=cents(balance.get("pending", [])),
+        currency="usd",
+        payouts=[
+            PayoutItem(
+                amount_cents=int(p.get("amount", 0)),
+                currency=p.get("currency", "usd"),
+                status=p.get("status", ""),
+                arrival_date=datetime.fromtimestamp(int(p.get("arrival_date", 0)), tz=timezone.utc).date().isoformat(),
+            )
+            for p in payouts.get("data", [])
+        ],
+    )
 
 
 # ---------- Stripe Connect webhook ----------
