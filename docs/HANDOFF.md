@@ -1,6 +1,6 @@
 # eventnxt-backend: docs/HANDOFF.md
 # EventNXT — Handoff & Working Notes
-_Last updated: 2026-09-05 (the Promote-redesign / public-page-split session)_
+_Last updated: 2026-09-06 (the Stripe Connect / reserve / purchasing-agreement session)_
 
 EventNXT is the casting/guest/ticketing app built for Tito's FashioNXT events
 (events360.app). Two repos: `eventnxt-backend` (FastAPI + SQLAlchemy + Alembic
@@ -94,6 +94,50 @@ stamps who brought the buyer. Bonus tiers resolve via
 else event default) — the SAME resolution the award machinery runs, and the
 same one shown to referrers in the portal.
 
+**Payments & money (migrations 0045–0048).** Stripe Connect, DESTINATION
+charges: EventNXT's platform account is merchant of record; buyers pay
+face value; the organizer's share transfers atomically to their
+connected account. `payment_accounts` is ORG-scoped (one Express account
+per Events360 org — acct id + three status booleans mirrored ONLY by the
+`account.updated` Connect webhook at `/webhooks/stripe-connect`, its own
+`STRIPE_CONNECT_WEBHOOK_SECRET`, fail-closed). Express accounts are
+created with a 7-DAY payout delay. The application fee sent to Stripe =
+`platform_fee_cents` (3% + 75¢ policy, snapshotted) **+ `reserve_cents`**
+(≈2.9% + 30¢, the estimated processing cost, 0047) — the reserve cash
+never leaves platform custody. `orders.stripe_destination_account`
+snapshots where the money settled (NULL = platform-account fallback);
+`STRIPE_REQUIRE_CONNECTED_ACCOUNT=false` (the go-live switch) lets
+unconnected orgs still charge into the platform account, `=true` 409s
+them pre-persist ($0 orders exempt).
+
+**Refunds & the reserve — one line: RELEASE = SUM(reserve) OVER
+STILL-PAID ORDERS.** A refund reverses the transfer; with an UNRELEASED
+reserve the withheld app fee is KEPT (`refund_application_fee=False`) —
+the fee slice funds the buyer's 100%, the reserve slice covers Stripe's
+never-returned processing cost, and the organizer bears it because that
+order's reserve never releases (collected by NON-PAYMENT, never a debit
+that can fail — mass event cancellation nets the platform zero).
+Released/zero-reserve (legacy) orders fall back to
+`refund_application_fee=True` = platform eats the cost. The release
+endpoint (`/payments/release-reserve`) is gated STRICTLY after the
+event's last day (Events360 dates, fails closed when unknown), locks
+rows FOR UPDATE, pays ONE transfer with a deterministic idempotency key
+(`event+sum+count`), transfer-first stamps-after. Refunds also DELETE
+the order's native Sale rows (referral tallies net down) but crossed
+volume bonuses stay — final and non-revocable, per the purchasing
+agreement.
+
+**Purchasing agreement (0048).** `terms_accepted` is REQUIRED at
+checkout — enforced server-side FIRST, before any inventory work, both
+paid and $0 paths; acceptance stamps `orders.terms_accepted_at` (null =
+pre-agreement order). `marketing_opt_in` is the optional §7 consent —
+default false, backfilled false (unknown consent = no consent), shown to
+organizers as the "✓ marketing OK" tag on Orders. The agreement text
+lives at the frontend's static public `/terms/purchase`
+(`PurchaseTermsPage.jsx`) — THE single buyer-facing copy; attorney
+revisions get pasted there. Comp/RSVP guests are never asked (no
+checkout) — RSVP-side consent is an offered, unbuilt slice.
+
 ---
 
 ## 2. Inventory math — the definitions (all code-verified)
@@ -139,6 +183,20 @@ last-column `col-flex` slack.
 
 **Seats Setup**: type composer + type list + comp-only areas + reservations.
 Day chips (All · each night · All-days) filter both lists.
+
+**Event settings** gained the org-scoped **Payouts card** (status pill,
+Connect/Finish button → Stripe-hosted Express onboarding via one-time
+Account Links — always mint fresh, they die in minutes; "Manage payouts"
+login link once `details_submitted`); returning from Stripe lands on
+`/?payments=return`, which the Dashboard reads to open straight onto
+Event settings. **Orders** opens with the **Earnings panel**: event
+gross/fees/net/refunded from order snapshots (native money only), the
+reserve strip (Held / Released / Used-on-refunds + the post-event
+"Release reserve ($X)" button when releasable), and the org-wide live
+Stripe balance + recent payouts when connected. The public checkout card
+carries the required agree-box (links `/terms/purchase`, pay button
+disabled until checked — AND enforced server-side) and the optional
+marketing box.
 
 **Seating summary** (Manage): every pool as a block with per-section
 Capacity · Sold · Comps · Avail, same day chips, frozen header. The box-office
@@ -212,7 +270,7 @@ favor of UTM.
 
 ## 4. Verification harness (the actual safety net)
 
-**Backend**: 25 standalone suites in `test/` — run each with
+**Backend**: 30 standalone suites in `test/` — run each with
 `python3 test/test_X.py` with `DATABASE_URL` set. Local Postgres 16 lives at
 `/tmp/pgdata`, port 5433, socket `/tmp`, db `eventnxt_test`; it dies between
 container sessions — restart:
@@ -225,6 +283,16 @@ server is genuinely DOWN (stale pidfile). Removing it on a RUNNING server
 triggers immediate shutdown. Postgres also dies BETWEEN bash commands
 constantly in the container — restart before regressions, and wrap one-off
 runs with a restart fallback.
+
+Connect-era suites: `test_connect` (account lifecycle + webhook
+idempotency + fail-closed), `test_destination_charges` (routing, the
+gate, fee+reserve param, refund flags, sub-dollar fee cap against the
+REAL gateway), `test_reserve` (THE cancellation ledger + release
+gating/idempotency key + used-vs-released accounting), `test_earnings`
+(money-state sums), `test_purchase_terms` (agreement enforcement +
+consent storage/exposure). Fakes in these suites are uuid-suffixed —
+fixed fake session/acct ids collide with rows previous runs left behind
+(unique constraints are the referee here too).
 
 Promote-era suites: `test_self_promos` (0042 self-promo guards),
 `test_referral_setup` (referrer fencing, same-email identity, portal payload,
@@ -305,6 +373,23 @@ it.
 uses them deliberately); `border-collapse: collapse` silently kills sticky
 headers; table slack goes to the LAST column only.
 
+**Never swallow an external API's error.** The first live Connect click
+502'd behind a generic "try again" — the real Stripe message (the entire
+diagnosis) was caught and discarded, costing a full diagnose-redeploy
+round trip. Every Stripe catch in payments.py now routes through
+`_stripe_502`, which logs the raw error AND appends Stripe's
+`user_message` to the detail. The rule generalizes: a catch that
+doesn't log the cause is a debugging debt.
+
+**New Stripe sandboxes are v2-first.** Fresh Connect setups DISABLE
+Accounts v1: `Account.create(type='express')` is rejected until the
+"Accounts v1 support" feature is enabled (dashboard → Settings →
+Account features). The webhook wizard similarly pushes `v2.core.*`
+events with Thin payloads — the app needs classic `account.updated`
+with SNAPSHOT payloads. The SAME v1 toggle must be enabled in LIVE mode
+at the go-live swap or the first real organizer's connect click dies
+identically.
+
 **jsdom cannot see layout.** Anything touching geometry gets an explicit
 "give it your eyes on deploy" flag.
 
@@ -324,6 +409,14 @@ grep.
   people as typeless, fenced Guest rows.
 - **0044** `referral_contacts` table + `referral_contact_id` on orders and
   sales — per-recipient outreach tracking and attribution stamps.
+- **0045** `payment_accounts` — org-scoped Stripe Express account (acct
+  id + three webhook-mirrored status booleans; nothing sensitive).
+- **0046** `orders.stripe_destination_account` — where the money settled
+  at charge time; refunds reverse the transfer iff set.
+- **0047** `orders.reserve_cents` + `reserve_released_at` — the
+  refund-cost reserve (release = sum over still-paid orders).
+- **0048** `orders.terms_accepted_at` + `marketing_opt_in` — purchasing
+  agreement enforcement + §7 marketing consent.
 
 ---
 
@@ -334,7 +427,7 @@ grep.
   file in GitHub if not already done), `api.updateSeatingCategory` (zero
   references; removed from `api.js`).
 - **NEEDS-MIGRATION-FIRST — the `select` mode kill (spec'd, awaiting go)**:
-  migration 0045 converts `guest_mode='select'` → `'invite'`; then delete the
+  migration 0049+ (renumbered thrice: 0045→0047→0048 got used) converts `guest_mode='select'` → `'invite'`; then delete the
   mode from `comp_tickets.py` (GUEST_MODES + ~5 branches), the
   `schemas/guest.py` literals, the RSVP chooser fallback
   (`schemas/rsvp.py` + `PublicRSVPPage.jsx` line ~54), and the legacy option
@@ -351,31 +444,72 @@ grep.
 
 ## 8. Open items & standing offers
 
-- **Rebuild `multiday_smoke.cjs`** against current code (original lost —
-  see §4).
-- **Comp minting for type-less pools**: whether native code-minting behaves
-  for a pool with NO ticket type has never been explicitly verified — check
-  before relying on it for FashioNXT's press rows.
-- **"Unsectioned" row** on Seating summary for pool-level comps
-  (nice-to-have).
-- **`select`-mode kill** — spec above, needs Joshua's explicit go.
-- **FashioNXT dry run** on the deployed app with real casting data
-  (recommended BEFORE new feature work; `requirements.txt` must be deployed
-  for the PDF ticket deps).
-- **Stripe Connect + payout ledger** — blocked on three decisions: Connect
-  flavor (Express recommended vs Standard), money flow (destination charges
-  with application fee — matching the existing platform_fee/organizer_net
-  order snapshots — vs manual transfers), payout timing (per-sale vs held
-  until per-event release).
+- **FashioNXT dry run** on the deployed app with real casting data —
+  STRONGEST recommendation before any new feature work; it now
+  rehearses the ENTIRE money path (connect → sell → refund → release)
+  plus PDFs (`requirements.txt` must be deployed for the PDF deps).
+- **Sandbox eyes-on money check** (load-bearing, still owed): refund one
+  reserved order and verify the three balances — buyer +100%,
+  organizer's balance down exactly their transfer, platform balance
+  UNCHANGED by the refund. That single observation validates the refund
+  flag arithmetic the reserve design derives from docs.
+- **Consent follow-ups (offered, unbuilt)**: an "emails with marketing
+  consent" export/filter on Orders; RSVP-page opt-in stored on guests +
+  Guest-list tag (comp people are never asked today).
+- **Chargeback enforcement** — the agreement makes organizers liable;
+  wiring `charge.dispute.*` webhooks into reserve/payout deduction is
+  the enforcement slice (today it'd be manual).
+- **Postponement ticket re-dating** — accepted onto the roadmap (terms
+  promise tickets honored on rescheduled dates; dated codes make that
+  manual today; Guest-list manual check-in is the stopgap).
+- **Stripe Tax** — parked until the first event in a taxing state
+  (Oregon home base = no sales tax); agreement's tax clause + a CPA
+  hour at that milestone.
+- **Support email** — §10 of the purchasing agreement (docx AND
+  `PurchaseTermsPage.jsx`) carries a placeholder ending; paste the real
+  address when it exists.
+- **`select`-mode kill** — spec above (§7), needs Joshua's explicit go.
+- **Rebuild `multiday_smoke.cjs`** against current code (original lost).
+- **Comp minting for type-less pools** — never explicitly verified;
+  check before relying on it for FashioNXT's press rows.
 - **Role-gated sidebar** — blocked on Tito's Events360 role values.
 - **Add-ons page** — needs a design conversation; no backend exists.
-- **Seat-adjacency automation**; the silent-email logging patch (declined
-  earlier, revisit if delivery questions come up).
-- **Eyes-on-deploy queue**: tickets tab on the real FashioNXT event
-  (mixed-span: package under the All-days chip, nights under theirs),
-  ticket-row column alignment, checkout-card focus ring against the event
-  accent, referrer portal on mobile (deal line wrapping with several points
-  rates).
+- **Seat-adjacency automation**; "Unsectioned" row on Seating summary;
+  the silent-email logging patch (nice-to-haves / revisit on demand).
+- **Eyes-on-deploy queue**: checkout agree/marketing checkbox spacing on
+  mobile, `/terms/purchase` page once, a fresh order showing the
+  "✓ marketing OK" tag, Earnings/reserve strip wrapping on mobile,
+  tickets tab on the real FashioNXT event (mixed-span chips), referrer
+  portal on mobile.
+
+---
+
+## 8a. Go-live checklist (sandbox → live), in order
+
+1. Activate the LIVE platform account (choose the legal entity — this
+   is the merchant of record), complete the live Connect platform
+   profile, set statement descriptor + Connect branding (live settings
+   are separate from sandbox).
+2. Enable **Accounts v1 support** in LIVE mode (§5 lesson — new
+   platforms ship with it off; the connect button dies without it).
+3. Recreate BOTH webhook endpoints in live mode: `/webhooks/stripe`
+   (your account: checkout.session.completed/expired) and
+   `/webhooks/stripe-connect` (Connected accounts: `account.updated`,
+   SNAPSHOT payload, classic event — not v2.core).
+4. Configure Stripe's 1099 tax-reporting settings for Connect before
+   the January cycle.
+5. THE one-time config-var swap, all four TOGETHER:
+   `STRIPE_SECRET_KEY` (sk_live), `STRIPE_WEBHOOK_SECRET`,
+   `STRIPE_CONNECT_WEBHOOK_SECRET`, and
+   `STRIPE_REQUIRE_CONNECTED_ACCOUNT=true`. (A live key with a test
+   webhook secret = charged buyers with forever-pending orders.)
+6. `DELETE FROM payment_accounts;` — sandbox rows point at test acct
+   ids that don't exist in live mode; orgs re-onboard with real
+   business/bank/identity details (live KYC: minutes to a day).
+7. Verify with real money: one small live purchase (watch the transfer
+   + application fee + 7-day payout date on the connected balance),
+   then refund it (watch the reversal and the kept reserve). Cost:
+   Stripe's ~2.9%+30¢, never returned.
 
 ---
 
