@@ -120,6 +120,7 @@ def _build_referral_codes(db: Session, event_id: str, guest_id: str):
                 total_reward=float(a.total_reward) if a and a.total_reward is not None else None,
                 discount_type=code.discount_type,
                 discount_value=float(code.discount_value) if code.discount_value is not None else None,
+                referral_message_draft=code.referral_message_draft,
                 contacts=contacts_by_code.get(code.id, []),
                 eligible_tiers=[
                     EligibleTier(
@@ -632,7 +633,12 @@ def refer_people(token: str, payload: RSVPReferRequest, db: Session = Depends(ge
             db.flush()
         link = f"{base}/e/{profile.slug}?ref={code.code}&r={contact.token}"
         lines = [f"Hi {person.name},", ""]
-        if code.referral_message_draft:
+        # Referrer's own words win; the organizer's draft is the prefill
+        # they started from; the plain default covers neither existing.
+        custom = (payload.message or "").strip()
+        if custom:
+            lines += [custom, ""]
+        elif code.referral_message_draft:
             lines += [code.referral_message_draft, ""]
         else:
             lines += [f"{guest.name} thinks you'd love {event_name}.", ""]
@@ -646,7 +652,7 @@ def refer_people(token: str, payload: RSVPReferRequest, db: Session = Depends(ge
         try:
             email_service.send_email(
                 to=person.email,
-                subject=f"{guest.name} invited you to {event_name}",
+                subject=(payload.subject or "").strip() or f"{guest.name} invited you to {event_name}",
                 text_body="\n".join(lines),
             )
             contact.sent_at = datetime.now(timezone.utc)

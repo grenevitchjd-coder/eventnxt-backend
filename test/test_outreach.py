@@ -138,6 +138,31 @@ def main():
     c.post(f"/public/rsvp/{sarah['rsvp_token']}/refer",
            json={"promo_code_id": sc["id"], "contacts": [{"name": "Solo", "email": "solo@x.com"}]})
 
+    print("== 1b. custom subject/message (2026-09-05 adjust) ==")
+    SENT.clear()
+    r = c.post(f"/public/rsvp/{sarah['rsvp_token']}/refer",
+               json={"promo_code_id": sc["id"], "subject": "Come with me to this!",
+                     "message": "Hey — I'll be there Friday, you HAVE to come. Use my link below.",
+                     "contacts": [{"name": "Pat", "email": "pat@x.com"}]})
+    check("custom refer 200", r.status_code == 200, f"{r.status_code} {r.text[:120]}")
+    m = SENT[-1]
+    check("custom subject used", m["subject"] == "Come with me to this!", m["subject"])
+    check("custom message in the body", "you HAVE to come" in m["text"], m["text"][:200])
+    check("tracked link still appended", "?ref=SARAH10&r=" in m["text"])
+    check("on-behalf-of footer kept", "on behalf of Sarah" in m["text"], m["text"][-120:])
+    SENT.clear()
+    c.post(f"/public/rsvp/{sarah['rsvp_token']}/refer",
+           json={"promo_code_id": sc["id"], "contacts": [{"name": "Pat", "email": "pat2@x.com"}]})
+    check("default subject when omitted", SENT[-1]["subject"].startswith("Sarah invited you"),
+          SENT[-1]["subject"])
+    r = c.post(f"/public/rsvp/{sarah['rsvp_token']}/refer",
+               json={"promo_code_id": sc["id"], "message": "x" * 2001,
+                     "contacts": [{"name": "Pat", "email": "pat3@x.com"}]})
+    check("over-cap message rejected", r.status_code == 422, f"{r.status_code}")
+    portal = c.get(f"/public/rsvp/{sarah['rsvp_token']}").json()
+    check("message draft exposed for prefill",
+          "referral_message_draft" in portal["referral_codes"][0])
+
     print("== 2. click stamping ==")
     r = c.post(f"/public/events/{slug}/promo-codes/SARAH10/click?r={jane_token}")
     check("click ping accepts the token", r.status_code == 204, f"{r.status_code}")

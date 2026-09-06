@@ -96,6 +96,13 @@ class ReferContactItem(BaseModel):
 class RSVPReferRequest(BaseModel):
     promo_code_id: str
     contacts: List[ReferContactItem]
+    # Optional personalization (2026-09-05): the referrer's own words.
+    # The tracked link, discount line, and on-behalf-of footer are ALWAYS
+    # appended server-side — the referrer customizes the message, never
+    # the mechanism. Caps are anti-abuse: this pipes user-written text
+    # through the platform's own outbound email.
+    subject: Optional[str] = Field(default=None, max_length=150)
+    message: Optional[str] = Field(default=None, max_length=2000)
 
 
 class ReferralCodeInfo(BaseModel):
@@ -119,6 +126,8 @@ class ReferralCodeInfo(BaseModel):
     # So the portal can tell followers what the code is worth to THEM.
     discount_type: Optional[str] = None
     discount_value: Optional[float] = None
+    # Prefill for the refer tab's message box (organizer's suggested text).
+    referral_message_draft: Optional[str] = None
     contacts: List[ReferralContactInfo] = []
 
 
