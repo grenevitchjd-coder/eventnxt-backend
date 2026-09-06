@@ -220,6 +220,16 @@ def main():
           scode["tickets_sold"] == stats["SARAH10"]["tickets_sold"],
           f"{scode['tickets_sold']} vs {stats['SARAH10']['tickets_sold']}")
 
+    print("== 6. payout agreement in the portal payload ==")
+    check("reward terms present ($2 flat)", scode["reward_type"] == "flat_amount"
+          and scode["reward_value"] == 2.0, f"{scode['reward_type']} {scode.get('reward_value')}")
+    c.post(f"/events/{EV}/bonus-tiers", json={"tickets_required": 20, "bonus_value": 50}, headers=H)
+    scode2 = next(x for x in c.get(f"/public/rsvp/{sarah['rsvp_token']}").json()["referral_codes"]
+                  if x["code"] == "SARAH10")
+    check("effective bonus tiers ride along",
+          any(t["tickets_required"] == 20 and t["bonus_value"] == 50.0 for t in scode2["bonus_tiers"]),
+          str(scode2["bonus_tiers"]))
+
     print()
     if failures:
         print(f"outreach: {len(failures)} FAILURE(S): {failures}")

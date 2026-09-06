@@ -13,6 +13,8 @@ from app.models.promo_code import PromoCode, RewardType
 from app.models.reward_redemption import RewardRedemption
 from app.models.guest_ticket_request import GuestTicketRequest
 from app.schemas.rsvp import (
+    DealBonusTier,
+    DealPointsRate,
     ReferralContactInfo,
     RSVPReferRequest,
     DayGrantItem,
@@ -29,6 +31,8 @@ from app.schemas.rsvp import (
 )
 from app.services import redemptions as redemptions_service
 from app.services import sales as sales_service
+from app.models.promo_code_points_rate import PromoCodePointsRate
+from app.services import bonuses as bonuses_service
 import secrets
 from datetime import datetime, timezone
 
@@ -112,6 +116,17 @@ def _build_referral_codes(db: Session, event_id: str, guest_id: str):
                 promo_code_id=str(code.id),
                 code=code.code,
                 reward_type=code.reward_type.value,
+                reward_value=float(code.reward_value) if code.reward_value is not None else None,
+                points_rates=[
+                    DealPointsRate(ticket_type=pr.ticket_type, points=pr.points)
+                    for pr in db.query(PromoCodePointsRate)
+                    .filter(PromoCodePointsRate.promo_code_id == code.id)
+                    .all()
+                ] if code.reward_type == RewardType.POINTS else [],
+                bonus_tiers=[
+                    DealBonusTier(tickets_required=t.tickets_required, bonus_value=float(t.bonus_value))
+                    for t in bonuses_service.effective_bonus_tiers(db, event_id, code)
+                ],
                 points_available=points_available,
                 tickets_sold=int(a.tickets_sold) if a else 0,
                 amount_sold=float(a.amount_sold) if a else 0,

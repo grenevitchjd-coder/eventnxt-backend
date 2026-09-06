@@ -105,10 +105,28 @@ class RSVPReferRequest(BaseModel):
     message: Optional[str] = Field(default=None, max_length=2000)
 
 
+class DealPointsRate(BaseModel):
+    ticket_type: str
+    points: int
+
+
+class DealBonusTier(BaseModel):
+    tickets_required: int
+    bonus_value: float
+
+
 class ReferralCodeInfo(BaseModel):
     promo_code_id: str
     code: str
     reward_type: str
+    # ---- The payout agreement, spelled out (2026-09-05 request) ----
+    # reward_value in the reward_type's unit ($ per ticket, % of sale,
+    # free tickets per ticket); points codes use points_rates instead.
+    # bonus_tiers is what ACTUALLY applies — this code's override when
+    # set, else the event default (effective_bonus_tiers).
+    reward_value: Optional[float] = None
+    points_rates: List[DealPointsRate] = []
+    bonus_tiers: List[DealBonusTier] = []
     points_available: Optional[int] = None  # only meaningful for a points-type code
     eligible_tiers: List[EligibleTier] = []
     redemption_history: List["RedemptionHistoryItem"] = []
