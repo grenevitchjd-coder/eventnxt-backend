@@ -26,12 +26,21 @@ def _client() -> None:
     stripe.api_key = settings.stripe_secret_key
 
 
-def create_checkout_session(order: Order, line_items_data: list[dict], success_url: str, cancel_url: str, discount_cents: int = 0, discount_label: str | None = None):
+def create_checkout_session(order: Order, line_items_data: list[dict], success_url: str, cancel_url: str, discount_cents: int = 0, discount_label: str | None = None, destination_account_id: str | None = None, application_fee_cents: int = 0):
     """
     line_items_data: [{'name': ..., 'unit_price_cents': ..., 'quantity': ..., 'currency': ...}]
     The session expires when our pending hold does — the two deadlines are
     the same 30 minutes on purpose, so Stripe never accepts a payment for
     a hold we've already released.
+
+    destination_account_id (Connect, slice 2): when set, the payment is a
+    DESTINATION CHARGE — the buyer pays the platform, Stripe atomically
+    transfers the organizer's share to their connected account, and
+    application_fee_cents stays with the platform. Stripe's processing
+    fee comes out of the platform's side, which is exactly the fee model
+    (organizer pays the flat platform fee, platform keeps the margin over
+    Stripe's cost). When None, the charge settles entirely into the
+    platform account, exactly as before Connect existed.
     """
     _client()
     # A promo discount becomes an ad-hoc single-use Stripe coupon, so the
@@ -46,8 +55,20 @@ def create_checkout_session(order: Order, line_items_data: list[dict], success_u
             name=(discount_label or "Discount")[:40],
         )
         discounts = [{"coupon": coupon.id}]
+    payment_intent_data = None
+    if destination_account_id:
+        # Stripe rejects an application fee above the amount actually
+        # charged — only reachable on a sub-dollar order where the fixed
+        # 75¢ exceeds the total. The ORDER's fee snapshot is untouched
+        # (it records the policy); the cap only bounds what Stripe moves.
+        amount_due = sum(li["unit_price_cents"] * li["quantity"] for li in line_items_data) - discount_cents
+        payment_intent_data = {
+            "transfer_data": {"destination": destination_account_id},
+            "application_fee_amount": max(0, min(application_fee_cents, amount_due)),
+        }
     session = stripe.checkout.Session.create(
         mode="payment",
+        payment_intent_data=payment_intent_data,
         line_items=[
             {
                 "price_data": {
@@ -76,12 +97,22 @@ def construct_webhook_event(payload: bytes, signature_header: str):
     return stripe.Webhook.construct_event(payload, signature_header, settings.stripe_webhook_secret)
 
 
-def create_refund(payment_intent_id: str):
+def create_refund(payment_intent_id: str, reverse_transfer: bool = False):
     """Full refund of the payment. Stripe keeps its processing fee — that
-    cost lands on the organizer per policy; EventNXT's platform fee is
-    returned in the ledger arithmetic (Phase 3) rather than here."""
+    cost lands on the platform's side of the ledger.
+
+    reverse_transfer=True (destination charges only): claw the
+    organizer's share back from their connected balance AND return the
+    platform's application fee to the buyer's refund — "no platform fee
+    on refunded tickets" enforced at the API, not by ledger arithmetic.
+    Never set it for a platform-account charge (there is no transfer to
+    reverse; Stripe would error)."""
     _client()
-    return stripe.Refund.create(payment_intent=payment_intent_id)
+    kwargs: dict = {"payment_intent": payment_intent_id}
+    if reverse_transfer:
+        kwargs["reverse_transfer"] = True
+        kwargs["refund_application_fee"] = True
+    return stripe.Refund.create(**kwargs)
 
 # ---------- Stripe Connect (organizer payout accounts) ----------
 #

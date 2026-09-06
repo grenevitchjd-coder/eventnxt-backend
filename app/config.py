@@ -52,6 +52,13 @@ class Settings(BaseSettings):
     # endpoint, separate secret, same fail-closed rule: empty means the
     # /webhooks/stripe-connect route rejects everything.
     stripe_connect_webhook_secret: str = ""
+    # Enforcement switch for Connect (slice 2). False (default): an org
+    # with no connected/enabled payout account still charges into the
+    # PLATFORM account — today's sandbox behavior, unchanged. True: paid
+    # checkout refuses (409) for such orgs, so no money can land in the
+    # platform account by accident. Flip to true via config var before
+    # the live-key swap.
+    stripe_require_connected_account: bool = False
 
     # EventNXT's platform fee, baked into the ticket's face value: the
     # buyer sees a clean price, the organizer bears the fee. These are

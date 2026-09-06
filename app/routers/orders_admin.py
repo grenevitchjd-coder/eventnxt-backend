@@ -116,7 +116,13 @@ def refund_order(
     # the local reversal below is the whole action.
     if order.stripe_payment_intent_id:
         try:
-            create_refund(order.stripe_payment_intent_id)
+            # Destination charge (snapshot set): pull the organizer's share
+            # back from their connected balance and return the platform fee
+            # with it — no platform fee on refunded tickets, at the API.
+            create_refund(
+                order.stripe_payment_intent_id,
+                reverse_transfer=bool(order.stripe_destination_account),
+            )
         except stripe_lib.error.StripeError as exc:
             raise HTTPException(status_code=502, detail=f"Stripe refused the refund: {getattr(exc, 'user_message', None) or 'try again.'}")
 

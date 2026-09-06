@@ -25,6 +25,7 @@ from app.models.order_item import OrderItem
 from app.models.promo_code import PromoCode
 from app.models.referral_contact import ReferralContact
 from app.services import referrals as referrals_service
+from app.models.payment_account import PaymentAccount
 from app.models.stripe_webhook_event import StripeWebhookEvent
 from app.models.seat import Seat
 from app.models.zone_section import ZoneSection
@@ -334,6 +335,30 @@ def start_checkout(slug: str, payload: CheckoutRequest, db: Session = Depends(ge
             order_token=order.order_token, checkout_url=None, total_cents=0, status="paid"
         )
 
+    # ---- Connect routing (slice 2): where does this money settle? ----
+    # The org is already snapshotted on the order; its payout account (if
+    # connected AND charges_enabled) makes this a destination charge. No
+    # account: either fall back to the platform account (sandbox/test
+    # behavior, unchanged) or — with enforcement on — refuse before
+    # anything persists. Nothing has been committed yet, so the rollback
+    # takes the pending order AND its holds with it: a buyer blocked here
+    # ties up no inventory.
+    payout_account = (
+        db.query(PaymentAccount)
+        .filter(PaymentAccount.organization_id == order.organization_id)
+        .first()
+    )
+    destination_account = (
+        payout_account.stripe_account_id if payout_account and payout_account.charges_enabled else None
+    )
+    if destination_account is None and settings.stripe_require_connected_account:
+        db.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail="Ticket sales for this event aren't live yet — the organizer hasn't finished payout setup.",
+        )
+    order.stripe_destination_account = destination_account  # snapshot; committed with the session id
+
     items = db.query(OrderItem).filter(OrderItem.order_id == order.id).all()
     try:
         session = create_checkout_session(
@@ -351,6 +376,8 @@ def start_checkout(slug: str, payload: CheckoutRequest, db: Session = Depends(ge
             cancel_url=f"{settings.eventnxt_frontend_url}/e/{slug}",
             discount_cents=order.discount_cents,
             discount_label=(promo_code.code.upper() if promo_code else None),
+            destination_account_id=destination_account,
+            application_fee_cents=order.platform_fee_cents,
         )
     except stripe_lib.error.StripeError:
         # The hold self-expires in 30 min either way; surface a clean error.

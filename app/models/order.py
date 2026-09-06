@@ -71,6 +71,12 @@ class Order(Base):
 
     stripe_checkout_session_id = Column(String, nullable=True, unique=True, index=True)
     stripe_payment_intent_id = Column(String, nullable=True)
+    # Where the money went at charge time (0046): the connected acct_...
+    # id for a destination charge, NULL for a platform-account charge, a
+    # $0 order, or an order that never reached payment. Refunds reverse
+    # the transfer iff this is set — never inferred from current account
+    # status, which proves nothing about an old charge.
+    stripe_destination_account = Column(String, nullable=True)
 
     order_token = Column(String, nullable=False, unique=True, index=True)
 
