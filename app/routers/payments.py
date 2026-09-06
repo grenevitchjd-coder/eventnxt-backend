@@ -20,6 +20,8 @@ ids, no identity data. Stripe collects all of that on its own hosted
 pages.
 """
 
+import logging
+
 from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -50,6 +52,21 @@ from app.services.deps import CurrentUser
 from app.services.event_access import require_event_access
 
 router = APIRouter(tags=["payments"])
+logger = logging.getLogger("eventnxt.payments")
+
+
+def _stripe_502(exc: Exception, doing: str) -> HTTPException:
+    """
+    Log the REAL Stripe error (the thing we need to debug from Heroku
+    logs) and surface Stripe's own human-readable user_message in the
+    502 detail when it has one — a generic message that swallows the
+    cause costs a whole diagnose-redeploy round trip, as learned the
+    hard way on the first live Connect click.
+    """
+    logger.error("Stripe error while %s: %r", doing, exc)
+    user_message = getattr(exc, "user_message", None)
+    suffix = f" Stripe says: {user_message}" if user_message else " Try again in a moment."
+    return HTTPException(status_code=502, detail=f"Stripe couldn't complete {doing}.{suffix}")
 
 
 def _org_account(db: Session, organization_id) -> PaymentAccount | None:
@@ -93,8 +110,8 @@ def connect_payments(
     if not account:
         try:
             stripe_account = gateway.create_express_account(str(user.organization_id))
-        except stripe_lib.error.StripeError:
-            raise HTTPException(status_code=502, detail="Stripe couldn't create the account. Try again in a moment.")
+        except stripe_lib.error.StripeError as exc:
+            raise _stripe_502(exc, "creating the payout account")
         account = PaymentAccount(
             organization_id=user.organization_id,
             stripe_account_id=stripe_account["id"],
@@ -118,8 +135,8 @@ def connect_payments(
     refresh_url = f"{settings.eventnxt_frontend_url}/?payments=refresh"
     try:
         link = gateway.create_account_link(account.stripe_account_id, return_url, refresh_url)
-    except stripe_lib.error.StripeError:
-        raise HTTPException(status_code=502, detail="Stripe couldn't start onboarding. Try again in a moment.")
+    except stripe_lib.error.StripeError as exc:
+        raise _stripe_502(exc, "starting onboarding")
     return PaymentLinkResponse(url=link["url"])
 
 
@@ -141,8 +158,8 @@ def manage_payments_link(
         raise HTTPException(status_code=400, detail="Finish connecting payouts first.")
     try:
         link = gateway.create_login_link(account.stripe_account_id)
-    except stripe_lib.error.StripeError:
-        raise HTTPException(status_code=502, detail="Stripe couldn't open the payouts dashboard. Try again in a moment.")
+    except stripe_lib.error.StripeError as exc:
+        raise _stripe_502(exc, "opening the payouts dashboard")
     return PaymentLinkResponse(url=link["url"])
 
 
@@ -277,9 +294,9 @@ def release_reserve(
             description=f"EventNXT reserve release — event {event_id}",
             idempotency_key=f"reserve-release-{event_id}-{total}-{len(rows)}",
         )
-    except stripe_lib.error.StripeError:
+    except stripe_lib.error.StripeError as exc:
         db.rollback()
-        raise HTTPException(status_code=502, detail="Stripe couldn't send the release. Try again in a moment.")
+        raise _stripe_502(exc, "sending the reserve release")
 
     now = datetime.now(timezone.utc)
     for o in rows:
@@ -311,8 +328,8 @@ def payout_summary(
     try:
         balance = gateway.retrieve_balance(account.stripe_account_id)
         payouts = gateway.list_payouts(account.stripe_account_id, limit=10)
-    except stripe_lib.error.StripeError:
-        raise HTTPException(status_code=502, detail="Stripe couldn't report the balance. Try again in a moment.")
+    except stripe_lib.error.StripeError as exc:
+        raise _stripe_502(exc, "reading the balance")
 
     return PayoutsResponse(
         connected=True,
