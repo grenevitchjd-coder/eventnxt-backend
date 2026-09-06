@@ -167,6 +167,7 @@ def _build_referral_codes(db: Session, event_id: str, guest_id: str):
 def _guest_extras(db: Session, guest: Guest, allotment: dict) -> dict:
     """The mode/needs-seating/ticket fields both RSVPInfoResponse shapes share."""
     codes = [t.code for t in comp_tickets.valid_comp_tickets(db, guest)]
+    extras_outreach = {"outreach_terms_accepted_at": guest.outreach_terms_accepted_at}  # 0051
     latest_req = (
         db.query(GuestTicketRequest)
         .filter(GuestTicketRequest.guest_id == guest.id)
@@ -188,6 +189,7 @@ def _guest_extras(db: Session, guest: Guest, allotment: dict) -> dict:
         else None
     )
     return {
+        **extras_outreach,
         "day_grants": day_grants,
         "spend_total": spend_total if (choose or mode == "distribute") else None,
         "choose_within_caps": choose,
@@ -620,6 +622,22 @@ def refer_people(token: str, payload: RSVPReferRequest, db: Session = Depends(ge
     page: without a slug there is nothing to link to.
     """
     guest = _get_guest_by_token_or_404(db, token)
+    # 0051: the Referral Outreach Policy gates EVERYTHING here — this
+    # endpoint pipes referrer-written words through the platform's own
+    # SMTP, so acceptance is enforced FIRST (before publish or code
+    # checks), stamped once, and never asked again. Same shape as the
+    # purchasing agreement's terms_accepted at checkout.
+    if guest.outreach_terms_accepted_at is None:
+        if not payload.outreach_terms_accepted:
+            raise HTTPException(
+                status_code=400,
+                detail="Please accept the Referral Outreach Policy before sending invites.",
+            )
+        guest.outreach_terms_accepted_at = datetime.now(timezone.utc)
+        # COMMIT, not flush: the acceptance is its own fact and must
+        # survive whatever the rest of this request does (an unpublished
+        # 400 must not silently un-accept the policy).
+        db.commit()
     code = db.query(PromoCode).filter(PromoCode.id == payload.promo_code_id).first()
     if not code or str(code.guest_id) != str(guest.id):
         raise HTTPException(status_code=404, detail="That promo code isn't associated with this link.")

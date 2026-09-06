@@ -31,6 +31,7 @@ class RSVPInfoResponse(BaseModel):
     """
 
     guest_name: str
+    outreach_terms_accepted_at: Optional[datetime] = None  # 0051: referrer accepted the Outreach Policy
     guest_type_name: Optional[str] = None  # None for referrer-only guests
     allocation_status: str
     visit_date: Optional[str] = None
@@ -103,6 +104,10 @@ class RSVPReferRequest(BaseModel):
     # through the platform's own outbound email.
     subject: Optional[str] = Field(default=None, max_length=150)
     message: Optional[str] = Field(default=None, max_length=2000)
+    # 0051: required TRUE on the referrer's first send (until their
+    # acceptance is stamped) — the same enforce-then-stamp shape as the
+    # purchasing agreement's terms_accepted.
+    outreach_terms_accepted: bool = False
 
 
 class DealPointsRate(BaseModel):

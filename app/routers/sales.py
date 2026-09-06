@@ -397,6 +397,16 @@ def send_referrer_portal_link(
         lines.append("(Share links will be in your portal once the event page is published.)")
         lines.append("")
     lines.append(f"Track your sales and claim rewards any time: {portal_link}")
+    lines += [
+        "",
+        "About your payout: the reward terms for each of your codes are shown on",
+        "your portal, and rewards accrue at the terms in effect when each sale",
+        "happens. The organizer may adjust terms for FUTURE sales, so later",
+        "payouts won't necessarily match your initial terms — your portal always",
+        "shows the current effective terms, and volume bonuses you've already",
+        "crossed are final. Payouts are settled after the event, net of refunds.",
+        f"Full referral terms & outreach policy: {base}/terms/referral",
+    ]
     text = "\n".join(lines)
 
     try:

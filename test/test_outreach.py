@@ -103,10 +103,22 @@ def main():
                 json={"guest_id": ben["id"], "code": "BEN10", "reward_type": "flat_amount",
                       "reward_value": 3}, headers=H).json()
 
-    print("== 1. /refer: tracked emails, idempotent tokens, publish required ==")
+    print("== 0. Outreach Policy gate (0051): accept first, stamped once ==")
+    SENT.clear()
     r = c.post(f"/public/rsvp/{sarah['rsvp_token']}/refer",
                json={"promo_code_id": sc["id"], "contacts": [{"name": "Jane", "email": "jane@x.com"}]})
-    check("unpublished event refuses refer", r.status_code == 400, f"{r.status_code}")
+    check("refer without policy acceptance -> 400, names the policy",
+          r.status_code == 400 and "Outreach Policy" in r.json()["detail"], r.text[:120])
+    check("nothing sent on the refusal", len(SENT) == 0)
+
+    print("== 1. /refer: tracked emails, idempotent tokens, publish required ==")
+    r = c.post(f"/public/rsvp/{sarah['rsvp_token']}/refer",
+               json={"promo_code_id": sc["id"], "contacts": [{"name": "Jane", "email": "jane@x.com"}],
+                     "outreach_terms_accepted": True})
+    check("unpublished event refuses refer (policy accepted first)", r.status_code == 400, f"{r.status_code}")
+    info0 = c.get(f"/public/rsvp/{sarah['rsvp_token']}").json()
+    check("acceptance stamped once, survives the publish refusal",
+          info0.get("outreach_terms_accepted_at") is not None, info0.get("outreach_terms_accepted_at"))
     c.patch(f"/events/{EV}/profile/refund-policy", json={"refund_policy": "none"}, headers=H)
     slug = c.post(f"/events/{EV}/profile/publish", headers=H).json()["slug"]
 
@@ -133,7 +145,8 @@ def main():
           f"{resent.split('&r=')[-1]} vs {jane_token}")
     # Ben invites the same Jane — allowed; this creates the ambiguity case 4 needs.
     c.post(f"/public/rsvp/{ben['rsvp_token']}/refer",
-           json={"promo_code_id": bc["id"], "contacts": [{"name": "Jane", "email": "jane@x.com"}]})
+           json={"promo_code_id": bc["id"], "contacts": [{"name": "Jane", "email": "jane@x.com"}],
+                 "outreach_terms_accepted": True})
     # And Sarah alone invites Solo.
     c.post(f"/public/rsvp/{sarah['rsvp_token']}/refer",
            json={"promo_code_id": sc["id"], "contacts": [{"name": "Solo", "email": "solo@x.com"}]})

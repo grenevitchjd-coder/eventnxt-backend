@@ -128,6 +128,9 @@ class Guest(Base):
     # this guest's actual tickets were sent (ordered on the external
     # platform and delivered). Null = not yet. See migration 0038.
     tickets_sent_at = Column(DateTime(timezone=True), nullable=True)
+    # 0051: the referrer accepted the Referral Outreach Policy — gates
+    # /refer (platform SMTP carrying their words); stamped once.
+    outreach_terms_accepted_at = Column(DateTime(timezone=True), nullable=True)
     # Choose-within-caps (0039): the TOTAL tickets this guest may take
     # when it's less than the sum of their per-day grants — the grants
     # become ceilings and the RSVP page lets them choose where to spend.
