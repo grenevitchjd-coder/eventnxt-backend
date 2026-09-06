@@ -86,6 +86,7 @@ def fake_create_checkout_session(order, line_items_data, success_url, cancel_url
         "destination": destination_account_id,
         "fee": application_fee_cents,
         "order_fee_snapshot": order.platform_fee_cents,
+        "order_reserve_snapshot": order.reserve_cents,
     })
     # uuid-suffixed: stripe_checkout_session_id is UNIQUE and this suite's
     # orders persist between runs — a fixed fake id collides on rerun.
@@ -99,8 +100,8 @@ refunds = []
 _real_refund = orders_admin_router.create_refund
 
 
-def fake_create_refund(payment_intent_id, reverse_transfer=False):
-    refunds.append({"pi": payment_intent_id, "reverse": reverse_transfer})
+def fake_create_refund(payment_intent_id, reverse_transfer=False, refund_application_fee=True):
+    refunds.append({"pi": payment_intent_id, "reverse": reverse_transfer, "fee_back": refund_application_fee})
     return SimpleNamespace(id="re_test")
 
 
@@ -165,8 +166,11 @@ def main():
     r = buy("dest@x.com", paid_t["id"], qty=2)
     check("checkout 200", r.status_code == 200, r.text[:120])
     check("session destination = connected acct", captured[-1]["destination"] == ACCT)
-    check("session fee == order's platform-fee snapshot",
-          captured[-1]["fee"] == captured[-1]["order_fee_snapshot"] and captured[-1]["fee"] > 0,
+    # PIN REWRITTEN for 0047: the app fee sent to Stripe is now the
+    # platform fee PLUS the withheld refund-cost reserve.
+    check("session fee == platform fee + reserve snapshots",
+          captured[-1]["fee"] == captured[-1]["order_fee_snapshot"] + captured[-1]["order_reserve_snapshot"]
+          and captured[-1]["order_reserve_snapshot"] > 0,
           str(captured[-1]))
     o_dest = order_by_email("dest@x.com")
     check("order snapshots the acct id", o_dest is not None and o_dest.stripe_destination_account == ACCT)
@@ -197,11 +201,15 @@ def main():
     o_dest = order_by_email("dest@x.com")
     r = c.post(f"/events/{EV}/orders/{o_dest.id}/refund", headers=H)
     check("destination refund 200", r.status_code == 200, r.text[:120])
-    check("reverse_transfer set", refunds[-1] == {"pi": "pi_dest", "reverse": True}, str(refunds[-1]))
+    # PIN REWRITTEN for 0047: an unreleased reserve absorbs the refund's
+    # processing cost, so the withheld app fee is NOT returned.
+    check("reverse_transfer set, app fee kept (reserve absorbs)",
+          refunds[-1] == {"pi": "pi_dest", "reverse": True, "fee_back": False}, str(refunds[-1]))
     o_plat = order_by_email("platform@x.com")
     r = c.post(f"/events/{EV}/orders/{o_plat.id}/refund", headers=H)
     check("platform refund 200", r.status_code == 200, r.text[:120])
-    check("no reversal on a platform charge", refunds[-1] == {"pi": "pi_plat", "reverse": False}, str(refunds[-1]))
+    check("no reversal on a platform charge",
+          refunds[-1]["pi"] == "pi_plat" and refunds[-1]["reverse"] is False, str(refunds[-1]))
 
     # ---- cleanup ----
     cfg.stripe_require_connected_account = False

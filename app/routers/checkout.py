@@ -358,6 +358,15 @@ def start_checkout(slug: str, payload: CheckoutRequest, db: Session = Depends(ge
             detail="Ticket sales for this event aren't live yet — the organizer hasn't finished payout setup.",
         )
     order.stripe_destination_account = destination_account  # snapshot; committed with the session id
+    # Refund-cost reserve (0047): withheld from the organizer's transfer
+    # by inflating the application fee — the reserve cash stays in the
+    # platform's custody from the moment of the charge. Destination
+    # charges only: on the platform-account fallback there's no transfer
+    # to withhold from (the platform already holds everything).
+    if destination_account is not None:
+        order.reserve_cents = (
+            round(amount_due * settings.reserve_percent / 100) + settings.reserve_fixed_cents
+        )
 
     items = db.query(OrderItem).filter(OrderItem.order_id == order.id).all()
     try:
@@ -377,7 +386,10 @@ def start_checkout(slug: str, payload: CheckoutRequest, db: Session = Depends(ge
             discount_cents=order.discount_cents,
             discount_label=(promo_code.code.upper() if promo_code else None),
             destination_account_id=destination_account,
-            application_fee_cents=order.platform_fee_cents,
+            # fee + reserve: what Stripe keeps on the platform's side. The
+            # gateway still caps the total at the amount due (sub-dollar
+            # orders); the order's snapshots stay uncapped policy numbers.
+            application_fee_cents=order.platform_fee_cents + order.reserve_cents,
         )
     except stripe_lib.error.StripeError:
         # The hold self-expires in 30 min either way; surface a clean error.

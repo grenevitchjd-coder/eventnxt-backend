@@ -77,6 +77,15 @@ class Order(Base):
     # the transfer iff this is set — never inferred from current account
     # status, which proves nothing about an old charge.
     stripe_destination_account = Column(String, nullable=True)
+    # Refund-cost reserve (0047): the est. Stripe processing cost withheld
+    # from the organizer's transfer on destination charges (the app fee
+    # sent to Stripe = platform_fee_cents + reserve_cents). Released to
+    # the organizer post-event ONLY while the order is still paid — a
+    # refunded order's reserve never releases, which is how the organizer
+    # bears the processing cost without any collectable debt. 0 on
+    # platform-account, $0, and pre-0047 orders.
+    reserve_cents = Column(Integer, nullable=False, default=0, server_default="0")
+    reserve_released_at = Column(DateTime(timezone=True), nullable=True)
 
     order_token = Column(String, nullable=False, unique=True, index=True)
 

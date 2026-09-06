@@ -97,21 +97,28 @@ def construct_webhook_event(payload: bytes, signature_header: str):
     return stripe.Webhook.construct_event(payload, signature_header, settings.stripe_webhook_secret)
 
 
-def create_refund(payment_intent_id: str, reverse_transfer: bool = False):
-    """Full refund of the payment. Stripe keeps its processing fee — that
-    cost lands on the platform's side of the ledger.
+def create_refund(payment_intent_id: str, reverse_transfer: bool = False, refund_application_fee: bool = True):
+    """Full refund of the payment. Stripe keeps its processing fee from
+    the original charge — the two flags decide whose ledger shows it.
 
     reverse_transfer=True (destination charges only): claw the
-    organizer's share back from their connected balance AND return the
-    platform's application fee to the buyer's refund — "no platform fee
-    on refunded tickets" enforced at the API, not by ledger arithmetic.
-    Never set it for a platform-account charge (there is no transfer to
-    reverse; Stripe would error)."""
+    organizer's transferred share back from their connected balance.
+    Never set it for a platform-account charge (no transfer to reverse;
+    Stripe would error).
+
+    refund_application_fee (only meaningful with a reversal):
+      True  — the withheld app-fee side returns too; the platform eats
+              the processing cost (pre-reserve behavior; post-release
+              and legacy orders).
+      False — the platform KEEPS the withheld app fee. With the 0047
+              reserve inside that fee, the reserve covers the processing
+              cost and the organizer bears it by that order's reserve
+              never releasing."""
     _client()
     kwargs: dict = {"payment_intent": payment_intent_id}
     if reverse_transfer:
         kwargs["reverse_transfer"] = True
-        kwargs["refund_application_fee"] = True
+        kwargs["refund_application_fee"] = refund_application_fee
     return stripe.Refund.create(**kwargs)
 
 # ---------- Stripe Connect (organizer payout accounts) ----------

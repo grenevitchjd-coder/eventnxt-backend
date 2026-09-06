@@ -117,11 +117,23 @@ def refund_order(
     if order.stripe_payment_intent_id:
         try:
             # Destination charge (snapshot set): pull the organizer's share
-            # back from their connected balance and return the platform fee
-            # with it — no platform fee on refunded tickets, at the API.
+            # back from their connected balance. Whether the withheld
+            # app-fee side (platform fee + reserve) goes back too depends
+            # on the reserve (0047):
+            #   UNRELEASED reserve -> refund_application_fee=False. The
+            #   platform keeps the withheld amount; the platform fee slice
+            #   funds the buyer's refund (so no fee is profited on the
+            #   refund) and the reserve slice covers Stripe's unreturned
+            #   processing cost. The organizer's cost is that this order's
+            #   reserve never releases — no debit, nothing to collect.
+            #   RELEASED or ZERO reserve -> refund_application_fee=True,
+            #   the pre-reserve behavior: fee returned, platform eats the
+            #   processing cost (post-event stragglers, legacy orders).
+            reserve_absorbs = order.reserve_cents > 0 and order.reserve_released_at is None
             create_refund(
                 order.stripe_payment_intent_id,
                 reverse_transfer=bool(order.stripe_destination_account),
+                refund_application_fee=not reserve_absorbs,
             )
         except stripe_lib.error.StripeError as exc:
             raise HTTPException(status_code=502, detail=f"Stripe refused the refund: {getattr(exc, 'user_message', None) or 'try again.'}")

@@ -67,6 +67,12 @@ class Settings(BaseSettings):
     # rewrites an existing order's math.
     platform_fee_percent: float = 3.0
     platform_fee_fixed_cents: int = 75
+    # Refund-cost reserve rate (0047) — sized to Stripe's card-processing
+    # cost, withheld per destination sale and released post-event on
+    # still-paid orders. Config so a Stripe repricing is a config-var
+    # change; each order SNAPSHOTS its reserve at creation like the fee.
+    reserve_percent: float = 2.9
+    reserve_fixed_cents: int = 30
 
     class Config:
         env_file = ".env"
