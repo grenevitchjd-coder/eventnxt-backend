@@ -1,6 +1,7 @@
 # eventnxt-backend: app/schemas/rsvp.py
 from typing import Dict, List, Literal, Optional
 
+from datetime import datetime
 from pydantic import BaseModel, EmailStr, Field
 
 
@@ -76,6 +77,27 @@ class EligibleTier(BaseModel):
     affordable: bool
 
 
+class ReferralContactInfo(BaseModel):
+    """One invited person's outreach status, shown on the portal."""
+
+    name: str
+    email: str
+    sent_at: Optional[datetime] = None
+    clicked: bool = False
+    tickets_bought: int = 0
+    amount_bought: float = 0
+
+
+class ReferContactItem(BaseModel):
+    name: str
+    email: EmailStr
+
+
+class RSVPReferRequest(BaseModel):
+    promo_code_id: str
+    contacts: List[ReferContactItem]
+
+
 class ReferralCodeInfo(BaseModel):
     promo_code_id: str
     code: str
@@ -97,6 +119,7 @@ class ReferralCodeInfo(BaseModel):
     # So the portal can tell followers what the code is worth to THEM.
     discount_type: Optional[str] = None
     discount_value: Optional[float] = None
+    contacts: List[ReferralContactInfo] = []
 
 
 class RedemptionHistoryItem(BaseModel):

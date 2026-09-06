@@ -23,6 +23,8 @@ from app.models.event_profile import EventProfile
 from app.models.order import Order, OrderStatus
 from app.models.order_item import OrderItem
 from app.models.promo_code import PromoCode
+from app.models.referral_contact import ReferralContact
+from app.services import referrals as referrals_service
 from app.models.stripe_webhook_event import StripeWebhookEvent
 from app.models.seat import Seat
 from app.models.zone_section import ZoneSection
@@ -278,6 +280,29 @@ def start_checkout(slug: str, payload: CheckoutRequest, db: Session = Depends(ge
         if not promo_code:
             raise HTTPException(status_code=400, detail="That promo code isn't recognized for this event.")
 
+    # Per-recipient attribution (0044): a tracked outreach link carried
+    # r=<token>; the browser remembered it (last click wins). Resolution:
+    # - no code at all -> the contact's code IS the attribution ("no
+    #   promo code involved" still credits the sender);
+    # - code present and it's the contact's own -> stamp the person too;
+    # - buyer TYPED a different code -> the deliberate action beats the
+    #   remembered link: that code gets the sale, the contact stamp is
+    #   dropped. A dead/foreign token is ignored, never a checkout error.
+    referral_contact = None
+    contact_token = (payload.referral_contact_token or "").strip()
+    if contact_token:
+        contact = (
+            db.query(ReferralContact)
+            .filter(ReferralContact.event_id == profile.event_id, ReferralContact.token == contact_token)
+            .first()
+        )
+        if contact:
+            if promo_code is None:
+                promo_code = db.query(PromoCode).filter(PromoCode.id == contact.promo_code_id).first()
+                referral_contact = contact if promo_code is not None else None
+            elif promo_code.id == contact.promo_code_id:
+                referral_contact = contact
+
     try:
         order = ticketing.create_pending_order(
             db,
@@ -287,6 +312,8 @@ def start_checkout(slug: str, payload: CheckoutRequest, db: Session = Depends(ge
             requested=[(item.ticket_type_id, item.quantity, item.seat_ids, item.zone_section_id, item.zone_section_ids) for item in payload.items],
             promo_code=promo_code,
         )
+        if referral_contact is not None:
+            order.referral_contact_id = referral_contact.id
     except ticketing.CheckoutError as exc:
         db.rollback()
         raise HTTPException(status_code=400, detail=str(exc))
@@ -365,7 +392,7 @@ def check_public_promo_code(slug: str, code: str, db: Session = Depends(get_db))
 
 
 @router.post("/public/events/{slug}/promo-codes/{code}/click", status_code=204)
-def record_promo_link_click(slug: str, code: str, db: Session = Depends(get_db)):
+def record_promo_link_click(slug: str, code: str, r: str | None = None, db: Session = Depends(get_db)):
     """
     Tracked-link landing (/e/<slug>?ref=CODE). Always 204 — an
     unrecognized code reveals nothing (no code enumeration via response
@@ -376,6 +403,10 @@ def record_promo_link_click(slug: str, code: str, db: Session = Depends(get_db))
     db.query(PromoCode).filter(
         PromoCode.event_id == profile.event_id, PromoCode.code.ilike(code.strip())
     ).update({PromoCode.link_clicks: PromoCode.link_clicks + 1}, synchronize_session=False)
+    if r:
+        # Outreach link landing — stamp the invited person's first click.
+        profile = _published_profile_or_404(db, slug)
+        referrals_service.stamp_click(db, profile.event_id, r)
     db.commit()
 
 

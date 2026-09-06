@@ -121,6 +121,10 @@ class CheckoutRequest(BaseModel):
     # after the fact). An unrecognized code is a 400, not a silent skip:
     # an interactive buyer deserves the chance to fix a typo.
     promo_code: Optional[str] = None
+    # Per-recipient outreach token (0044) — the r=<token> the buyer's
+    # browser remembered from a tracked invite link. Optional, silently
+    # ignored when stale; see start_checkout for the resolution rules.
+    referral_contact_token: Optional[str] = None
 
 
 class CheckoutResponse(BaseModel):

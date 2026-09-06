@@ -37,6 +37,7 @@ class Sale(Base):
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     event_id = Column(UUID(as_uuid=True), nullable=False, index=True)
     promo_code_id = Column(UUID(as_uuid=True), ForeignKey("promo_codes.id"), nullable=True)
+    referral_contact_id = Column(UUID(as_uuid=True), ForeignKey("referral_contacts.id"), nullable=True)  # 0044
 
     buyer_name = Column(String, nullable=True)
     buyer_email = Column(String, nullable=True)

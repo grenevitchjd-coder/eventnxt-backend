@@ -6,8 +6,10 @@ from sqlalchemy.orm import Session
 from sqlalchemy import func
 
 from app.models.promo_code import PromoCode, RewardType
+from app.models.referral_contact import ReferralContact
 from app.models.sale import Sale
 from app.models.promo_code_points_rate import PromoCodePointsRate
+from app.models.referral_contact import ReferralContact
 from app.models.sale import Sale, SaleSource
 from app.models.sales_config import SalesPlatform
 
@@ -122,6 +124,32 @@ def reconcile_sale_row(db: Session, event_id: str, row: dict) -> Sale:
             .first()
         )
 
+    # Per-recipient stamping for external sales (0044) — click-grain is
+    # certain, sale-grain is best-effort by email:
+    # - codeless row + exactly one contact matching the buyer's email ->
+    #   credit that sender (code + person), same single-match rule as
+    #   native's device-switch fallback;
+    # - row already matched to a code -> stamp the person too, but only
+    #   when the single email match belongs to THAT code (a buyer both
+    #   invited by Sarah and typing Ben's code stays Ben's sale, personless).
+    referral_contact_id = None
+    buyer_email = row.get("buyer_email")
+    if buyer_email:
+        matches = (
+            db.query(ReferralContact)
+            .filter(ReferralContact.event_id == event_id, ReferralContact.email.ilike(buyer_email.strip()))
+            .limit(2)
+            .all()
+        )
+        if len(matches) == 1:
+            contact = matches[0]
+            if promo_code is None:
+                promo_code = db.query(PromoCode).filter(PromoCode.id == contact.promo_code_id).first()
+                if promo_code is not None:
+                    referral_contact_id = contact.id
+            elif promo_code.id == contact.promo_code_id:
+                referral_contact_id = contact.id
+
     amount = row.get("amount")
     ticket_type = row.get("ticket_type")
     quantity = row.get("quantity") or 1
@@ -139,6 +167,7 @@ def reconcile_sale_row(db: Session, event_id: str, row: dict) -> Sale:
         external_transaction_id=row.get("external_transaction_id") or None,
         source=SaleSource.CSV_UPLOAD,
         computed_reward=reward,
+        referral_contact_id=referral_contact_id,
     )
     db.add(sale)
     return sale

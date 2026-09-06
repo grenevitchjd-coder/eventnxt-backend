@@ -99,6 +99,7 @@ class SaleResponse(BaseModel):
     id: uuid.UUID
     event_id: uuid.UUID
     promo_code_id: Optional[uuid.UUID] = None
+    referral_contact_id: Optional[uuid.UUID] = None  # which invited person's link (0044)
     buyer_name: Optional[str] = None
     buyer_email: Optional[str] = None
     amount: Optional[Decimal] = None

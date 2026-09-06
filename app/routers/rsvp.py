@@ -13,6 +13,8 @@ from app.models.promo_code import PromoCode, RewardType
 from app.models.reward_redemption import RewardRedemption
 from app.models.guest_ticket_request import GuestTicketRequest
 from app.schemas.rsvp import (
+    ReferralContactInfo,
+    RSVPReferRequest,
     DayGrantItem,
     DayAllotment,
     DistributedRecipient,
@@ -27,6 +29,14 @@ from app.schemas.rsvp import (
 )
 from app.services import redemptions as redemptions_service
 from app.services import sales as sales_service
+import secrets
+from datetime import datetime, timezone
+
+from app.models.event_profile import EventProfile
+from app.models.referral_contact import ReferralContact
+from app.models.sale import Sale
+from app.services import email as email_service
+from app.config import settings
 from app.services import seating
 from app.services import comp_tickets
 
@@ -53,6 +63,37 @@ def _build_referral_codes(db: Session, event_id: str, guest_id: str):
         return None
 
     agg = sales_service.sale_aggregates_by_code(db, event_id)
+    contact_rows = (
+        db.query(ReferralContact)
+        .filter(ReferralContact.promo_code_id.in_([c.id for c in codes]))
+        .order_by(ReferralContact.created_at)
+        .all()
+    )
+    # Per-person conversion: what each invited person actually bought,
+    # from the same shared Sale table everything else reads.
+    conv = {}
+    if contact_rows:
+        from sqlalchemy import func as _f
+
+        for cid, tix, amt in (
+            db.query(Sale.referral_contact_id, _f.coalesce(_f.sum(Sale.quantity), 0), _f.coalesce(_f.sum(Sale.amount), 0))
+            .filter(Sale.referral_contact_id.in_([c.id for c in contact_rows]))
+            .group_by(Sale.referral_contact_id)
+            .all()
+        ):
+            conv[cid] = {"tickets": int(tix), "amount": float(amt)}
+    contacts_by_code = {}
+    for ct in contact_rows:
+        contacts_by_code.setdefault(ct.promo_code_id, []).append(
+            ReferralContactInfo(
+                name=ct.name,
+                email=ct.email,
+                sent_at=ct.sent_at,
+                clicked=ct.clicked_at is not None,
+                tickets_bought=conv.get(ct.id, {}).get("tickets", 0),
+                amount_bought=conv.get(ct.id, {}).get("amount", 0),
+            )
+        )
     result = []
     for code in codes:
         a = agg.get(code.id)
@@ -79,6 +120,7 @@ def _build_referral_codes(db: Session, event_id: str, guest_id: str):
                 total_reward=float(a.total_reward) if a and a.total_reward is not None else None,
                 discount_type=code.discount_type,
                 discount_value=float(code.discount_value) if code.discount_value is not None else None,
+                contacts=contacts_by_code.get(code.id, []),
                 eligible_tiers=[
                     EligibleTier(
                         redemption_tier_id=str(t["tier"].id),
@@ -545,6 +587,75 @@ def remove_distributed_recipient(token: str, child_id: str, db: Session = Depend
     db.delete(child)
     db.commit()
     return get_rsvp_info(token, db)
+
+
+@router.post("/public/rsvp/{token}/refer", response_model=RSVPInfoResponse)
+def refer_people(token: str, payload: RSVPReferRequest, db: Session = Depends(get_db)):
+    """
+    The portal's "refer people" tab: the referrer enters names/emails
+    and each person gets a unique tracked invite email —
+    /e/<slug>?ref=<CODE>&r=<contact-token> — so clicks and purchases
+    trace to that specific person. Verifies the code belongs to this
+    token's guest (same ownership check as /redeem). Re-entering an
+    email this code already invited RE-SENDS with the existing token
+    (idempotent) rather than minting a second identity; the same email
+    under a DIFFERENT referrer is deliberately allowed — that's the
+    collision last-click-wins exists for. Requires a published event
+    page: without a slug there is nothing to link to.
+    """
+    guest = _get_guest_by_token_or_404(db, token)
+    code = db.query(PromoCode).filter(PromoCode.id == payload.promo_code_id).first()
+    if not code or str(code.guest_id) != str(guest.id):
+        raise HTTPException(status_code=404, detail="That promo code isn't associated with this link.")
+    profile = db.query(EventProfile).filter(EventProfile.event_id == guest.event_id).first()
+    if not profile or not profile.is_published:
+        raise HTTPException(status_code=400, detail="The event page isn't published yet — there's no link to send. Ask the organizer.")
+
+    base = settings.eventnxt_frontend_url.rstrip("/")
+    event_name = profile.title or "the event"
+    sent = failed = 0
+    for person in payload.contacts:
+        contact = (
+            db.query(ReferralContact)
+            .filter(ReferralContact.promo_code_id == code.id, ReferralContact.email.ilike(person.email))
+            .first()
+        )
+        if contact is None:
+            contact = ReferralContact(
+                event_id=guest.event_id,
+                promo_code_id=code.id,
+                name=person.name,
+                email=person.email,
+                token=secrets.token_urlsafe(16),
+            )
+            db.add(contact)
+            db.flush()
+        link = f"{base}/e/{profile.slug}?ref={code.code}&r={contact.token}"
+        lines = [f"Hi {person.name},", ""]
+        if code.referral_message_draft:
+            lines += [code.referral_message_draft, ""]
+        else:
+            lines += [f"{guest.name} thinks you'd love {event_name}.", ""]
+        if code.discount_type == "percentage":
+            lines.append(f"Use their link and get {code.discount_value}% off:")
+        elif code.discount_type == "flat_amount":
+            lines.append(f"Use their link and get ${code.discount_value} off:")
+        else:
+            lines.append("Get your tickets here:")
+        lines += [link, "", f"Sent through EventNXT on behalf of {guest.name}."]
+        try:
+            email_service.send_email(
+                to=person.email,
+                subject=f"{guest.name} invited you to {event_name}",
+                text_body="\n".join(lines),
+            )
+            contact.sent_at = datetime.now(timezone.utc)
+            sent += 1
+        except Exception:
+            failed += 1
+    db.commit()
+    info = get_rsvp_info(token, db)
+    return info
 
 
 @router.post("/public/rsvp/{token}/redeem", response_model=RSVPInfoResponse)

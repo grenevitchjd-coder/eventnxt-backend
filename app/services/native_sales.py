@@ -27,6 +27,7 @@ from app.models.order import Order
 from app.models.order_item import OrderItem
 from app.models.promo_code import PromoCode
 from app.models.sale import Sale, SaleSource
+from app.services import referrals as referrals_service
 from app.services.bonuses import check_and_award_bonuses
 from app.services.sales import compute_reward
 
@@ -43,6 +44,21 @@ def record_native_sales(db: Session, order: Order) -> list[Sale]:
     promo_code = None
     if order.promo_code_id:
         promo_code = db.query(PromoCode).filter(PromoCode.id == order.promo_code_id).first()
+
+    # Device-switch fallback (0044): a buyer with NO code and NO tracked
+    # token may still have been invited — clicked on their phone, bought
+    # on their laptop. Credit the sender only on an exact single email
+    # match; ambiguity stays unattributed (the locked policy). Runs at
+    # paid time, so pending orders never accrue rewards speculatively.
+    referral_contact_id = order.referral_contact_id
+    if promo_code is None and referral_contact_id is None:
+        fallback = referrals_service.single_match_contact(db, order.event_id, order.buyer_email)
+        if fallback is not None:
+            promo_code = db.query(PromoCode).filter(PromoCode.id == fallback.promo_code_id).first()
+            if promo_code is not None:
+                referral_contact_id = fallback.id
+                order.promo_code_id = promo_code.id
+                order.referral_contact_id = fallback.id
 
     # The discount is order-level but Sale rows are per-item, and
     # percentage REWARDS must compute on money the buyer actually paid —
@@ -78,6 +94,7 @@ def record_native_sales(db: Session, order: Order) -> list[Sale]:
             external_transaction_id=f"eventnxt-{order.id}-{item.id}",
             source=SaleSource.NATIVE,
             computed_reward=reward,
+            referral_contact_id=referral_contact_id,
         )
         db.add(sale)
         sales.append(sale)

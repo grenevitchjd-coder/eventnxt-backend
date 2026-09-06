@@ -66,6 +66,8 @@ class Order(Base):
     # Stripe redirect, so attribution is known at purchase, not matched
     # after the fact like CSV imports).
     promo_code_id = Column(UUID(as_uuid=True), ForeignKey("promo_codes.id"), nullable=True)
+    # Which invited person's tracked link produced this purchase (0044).
+    referral_contact_id = Column(UUID(as_uuid=True), ForeignKey("referral_contacts.id"), nullable=True)
 
     stripe_checkout_session_id = Column(String, nullable=True, unique=True, index=True)
     stripe_payment_intent_id = Column(String, nullable=True)
