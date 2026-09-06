@@ -205,6 +205,122 @@ def replace_zone_sections(
     return resp
 
 
+@router.post("/{category_id}/fan-out", response_model=list[SeatingCategoryResponse])
+def fan_out_seating_category(
+    event_id: str,
+    category_id: str,
+    db: Session = Depends(get_db),
+    user: CurrentUser = Depends(require_event_access),
+):
+    """
+    "Same room every day" for events with NO ticket types (external
+    platform / invite-only). Clones this pool to every event day not
+    already covered by a same-named dated pool: the base keeps its bare
+    name and serves the FIRST night — the exact convention ticket-type
+    fan-out writes and pool_for_day's name-family fallback reads —
+    while clones are "<Base> (MM/DD)" with identical sections and
+    freshly generated seats, fully independent per-day inventories.
+    Idempotent: rerunning skips covered days. Reserved-seat holds are
+    NOT copied (a press hold is a per-day decision — block each day's
+    seats in its own Seats view). A pool sold by a ticket type refuses:
+    its day machinery lives on the type's own fan-out.
+    """
+    from app.services.comp_tickets import event_days_for
+    from app.services.seating import POOL_DAY_SUFFIX, normalized_name, pool_name_day
+
+    category = (
+        db.query(SeatingCategory)
+        .filter(SeatingCategory.id == category_id, SeatingCategory.event_id == event_id)
+        .first()
+    )
+    if not category:
+        raise HTTPException(status_code=404, detail="Seating pool not found for this event.")
+    if db.query(TicketType.id).filter(TicketType.seating_category_id == category.id).first():
+        raise HTTPException(
+            status_code=400,
+            detail="This area is sold by a ticket type — use the ticket type's own "
+            "\u201cCreate for every day\u201d instead.",
+        )
+    if POOL_DAY_SUFFIX.search(str(category.name or "")):
+        raise HTTPException(
+            status_code=400,
+            detail="Fan out from the base area — the one without a day in its name.",
+        )
+    days = event_days_for(db, event_id)
+    if len(days) < 2:
+        raise HTTPException(
+            status_code=400,
+            detail="This event has no multi-day list — set span and days in Event settings.",
+        )
+
+    # Days already covered by a same-named dated pool (normalized names,
+    # same as every other family-discovery site).
+    family_norm = normalized_name(category.name)
+    covered = set()
+    for sib in db.query(SeatingCategory).filter(SeatingCategory.event_id == event_id).all():
+        sm = POOL_DAY_SUFFIX.search(str(sib.name or ""))
+        if not sm:
+            continue
+        if normalized_name((sib.name or "")[: sm.start()]) != family_norm:
+            continue
+        sib_day = pool_name_day(sib.name, days)
+        if sib_day:
+            covered.add(sib_day)
+
+    sections = (
+        db.query(ZoneSection)
+        .filter(ZoneSection.seating_category_id == category.id)
+        .order_by(ZoneSection.sort_order)
+        .all()
+    )
+    created = []
+    for day in days[1:]:  # the bare base IS the first night's room
+        if day in covered:
+            continue
+        clone = SeatingCategory(
+            event_id=event_id,
+            name=f"{category.name} ({day[5:7]}/{day[8:10]})",
+            capacity=category.capacity,
+            sales_grain=category.sales_grain,
+            row_label=category.row_label,
+            section_label=category.section_label,
+            table_count=category.table_count,
+            seats_per_table=category.seats_per_table,
+        )
+        db.add(clone)
+        db.flush()
+        for i, sec in enumerate(sections):
+            db.add(
+                ZoneSection(
+                    seating_category_id=clone.id,
+                    section_label=sec.section_label,
+                    row_label=sec.row_label,
+                    capacity=sec.capacity,
+                    table_count=sec.table_count,
+                    seats_per_table=sec.seats_per_table,
+                    sort_order=i,
+                )
+            )
+        db.flush()
+        seats_service.sync_seats_for_pool(db, clone)
+        created.append(clone)
+    db.commit()
+
+    out = []
+    for clone in created:
+        db.refresh(clone)
+        resp = SeatingCategoryResponse.model_validate(clone)
+        resp.sections = [
+            ZoneSectionResponse.model_validate(x)
+            for x in db.query(ZoneSection)
+            .filter(ZoneSection.seating_category_id == clone.id)
+            .order_by(ZoneSection.sort_order)
+            .all()
+        ]
+        out.append(resp)
+    return out
+
+
 def _pool_or_404(db: Session, event_id: str, category_id: str) -> SeatingCategory:
     category = (
         db.query(SeatingCategory)

@@ -1,4 +1,6 @@
 """eventnxt-backend: app/services/seating.py"""
+import re
+
 from fastapi import HTTPException
 from sqlalchemy import func, or_
 from sqlalchemy.orm import Session
@@ -94,7 +96,9 @@ def pool_for_day(db: Session, base_pool_id, visit_date):
         .first()
     )
     if not base_type:
-        return base_pool_id
+        # No dated ticket type = external/invite-only territory: the
+        # day-family, if any, lives in the POOL NAMES themselves.
+        return _pool_name_family_for_day(db, base_pool_id, visit_date)
     if base_type.valid_date == visit_date:
         return base_pool_id
     sibling = (
@@ -108,6 +112,64 @@ def pool_for_day(db: Session, base_pool_id, visit_date):
         .first()
     )
     return sibling.seating_category_id if sibling else base_pool_id
+
+
+POOL_DAY_SUFFIX = re.compile(r"\s*\((\d{2})/(\d{2})\)$")
+
+
+def pool_name_day(name, days):
+    """The event day a pool's "(MM/DD)" name suffix points at, or None
+    for a bare name / a suffix matching no event day."""
+    m = POOL_DAY_SUFFIX.search(str(name or ""))
+    if not m:
+        return None
+    return next((d for d in days if d[5:7] == m.group(1) and d[8:10] == m.group(2)), None)
+
+
+def _pool_name_family_for_day(db: Session, base_pool_id, visit_date):
+    """
+    pool_for_day's fallback for events with NO dated ticket types
+    (external platform / invite-only). There the day-family convention
+    lives in the pool names — the same "(MM/DD)" suffix the fan-outs
+    write: the bare-named base serves the FIRST event day, each clone
+    carries its day in its name. Maps this pool to the family member
+    serving visit_date; returns the pool itself when there's nothing to
+    map (no day list, a lone pool with no dated siblings = one room
+    shared across days, or no member for that day).
+    """
+    pool = db.query(SeatingCategory).filter(SeatingCategory.id == base_pool_id).first()
+    if not pool:
+        return base_pool_id
+    from app.services.comp_tickets import event_days_for
+
+    days = event_days_for(db, pool.event_id)
+    if not days:
+        return base_pool_id
+
+    m = POOL_DAY_SUFFIX.search(str(pool.name or ""))
+    family_norm = normalized_name((pool.name or "")[: m.start()] if m else pool.name)
+
+    # Family members among this event's pools, keyed by the day their
+    # name serves (normalized-name match — a stray space can't split a
+    # family here any more than it can for ticket types).
+    bare_member_id, dated_members = None, {}
+    for sib in db.query(SeatingCategory).filter(SeatingCategory.event_id == pool.event_id).all():
+        sm = POOL_DAY_SUFFIX.search(str(sib.name or ""))
+        sib_family = normalized_name((sib.name or "")[: sm.start()] if sm else sib.name)
+        if sib_family != family_norm:
+            continue
+        if sm:
+            sib_day = pool_name_day(sib.name, days)
+            if sib_day:
+                dated_members[sib_day] = sib.id
+        else:
+            bare_member_id = sib.id
+
+    if not dated_members:
+        return base_pool_id  # lone pool: one room, every day
+    if bare_member_id:
+        dated_members.setdefault(days[0], bare_member_id)  # bare base = first night
+    return dated_members.get(visit_date, base_pool_id)
 
 
 def _pool_room_components(db: Session, category: SeatingCategory, exclude_guest_id=None) -> tuple[int, int]:
