@@ -5,6 +5,8 @@ from typing import List, Literal, Optional
 
 from pydantic import BaseModel, EmailStr, Field
 
+from app.schemas.seating_category import AdminSeatResponse
+
 
 class TicketAllotmentDayItem(BaseModel):
     date: str
@@ -93,6 +95,19 @@ class GuestSeatsAssignRequest(BaseModel):
     all; released seats stay reserved)."""
 
     seat_ids: List[uuid.UUID] = []
+
+
+class GuestSeatDayResponse(BaseModel):
+    """One night's seat map for a guest whose ticket spans several
+    nights — each night is a SEPARATE pool clone with its own Seat
+    rows, so picking or moving a seat for one specific night needs its
+    own map, not just the guest's 'home' pool. date=None for a single-
+    day/whole-event guest with nothing to pick between."""
+
+    date: Optional[str] = None
+    category_id: uuid.UUID
+    category_name: str
+    seats: List[AdminSeatResponse] = []
 
 
 class GuestSentStatusRequest(BaseModel):
