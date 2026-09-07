@@ -1,6 +1,7 @@
 # eventnxt-backend: docs/HANDOFF.md
 # EventNXT — Handoff & Working Notes
-_Last updated: 2026-09-06 (the external-events session: slices 1–6, migrations 0049–0052)_
+_Last updated: 2026-09-07 (the seat/ticket-integrity session: door sales,
+migrations 0053–0054, the ticket_type_id + unit_label cascade)_
 
 EventNXT is the casting/guest/ticketing app built for Tito's FashioNXT events
 (events360.app). Two repos: `eventnxt-backend` (FastAPI + SQLAlchemy + Alembic
@@ -102,11 +103,13 @@ any of this — all-days guest types worked already.
 **Pools (seating categories), sections, seats.** A pool has a
 `sales_grain`: `ga`, `row`, `table`, or `seat`. Row/table pools carry
 `ZoneSection` rows (label + capacity); seat pools carry actual `Seat` rows.
-Per-day events clone pools per night via ticket-type **fan-out** (native) or
-pool fan-out (external); clones are named `"<Base> (MM/DD)"` and form a
-**family**. The bare-named base pool serves the FIRST night. `pool_for_day`
-maps a family member + a date to the sibling serving that night — placement,
-hold counting, the recipient override, and now import stamping all route
+A pool also carries `unit_label` (0054, see below) — organizer vocabulary,
+not structure. Per-day events clone pools per night via ticket-type
+**fan-out** (native) or pool fan-out (external); clones are named
+`"<Base> (MM/DD)"` and form a **family**. The bare-named base pool serves
+the FIRST night. `pool_for_day` maps a family member + a date to the
+sibling serving that night — placement, hold counting, the recipient
+override, import stamping, and multi-day seat-family matching all route
 through it.
 
 **Ticket types** belong to pools, carry `valid_date` (null = pass/all-days),
@@ -244,6 +247,137 @@ lives at the frontend's static public `/terms/purchase`
 revisions get pasted there. Comp/RSVP guests are never asked (no
 checkout) — RSVP-side consent is an offered, unbuilt slice.
 
+**Door sales (0053).** Organizer staff (Guest-list access) sell walk-up
+tickets for cash from a tablet, full catalog parity with the public buyer
+page. `catalog`/`seat-map` logic was extracted into shared functions
+(`ticketing.ticket_catalog` / `seat_map_for_type`) reused by BOTH the
+public picker and `door_sales.py` — one source, so the two surfaces can
+never show different availability. A cash sale skips Stripe entirely
+(`orders.payment_method='cash'`, `sold_by_user_id`/`sold_by_name`
+snapshot the staffer) and charges no platform fee (organizer's explicit
+call). "Hold tickets now" for a distribute-mode guest (sponsor) on a
+SEAT-GRAIN day claims a REAL block of adjacent seats immediately
+(`seating.hold_seats_for_allotment`) instead of just a headcount, so
+named recipients draw from that guaranteed block
+(`seats.take_held_seats`) rather than each racing the general pool
+separately. Known gap: sectioned multi-night passes aren't sellable from
+this screen yet (rare case; still sell fine from the public page).
+
+**Comp tickets now carry a real `ticket_type_id`** (found and fixed in
+the same follow-up session, no new migration needed — the column
+already existed for paid orders).
+This was the deepest bug of the whole session: comp tickets were minted
+purely from `Guest`/`SeatingCategory`/`Seat`, with ZERO reference to the
+richer `TicketType` object (name, price, `admits`) — so once there was
+no specific seat to fall back to, a GA/table type ("Champagne Lounge")
+or an unassigned section showed nothing identifying AT ALL on the
+ticket. `issue_comp_tickets` now resolves and stores the matching
+`ticket_type_id` per minted ticket (day-mapped via
+`seating.ticket_type_for_area_day`); `seats.restamp_guest_tickets`
+backfills it onto already-minted tickets too, so "Update & resend"
+fixes a stale ticket instead of only new sends. Display priority,
+corrected mid-build per organizer feedback: structural detail
+(row/section/seat/table) ALWAYS wins over the ticket type's marketing
+name once a detail exists — "Row 3 · Section B" needs nothing else; the
+type name is only a fallback for a pure named-area type with nothing
+more specific (`seating.format_ticket_label`). One shared formatter
+chain (`format_ticket_label` / `format_guest_ticket_detail` /
+`format_seat_label`) now backs EVERY display that used to independently
+hardcode its own version: comp email/PDF, Guest-list QR panel, door
+scanner, paid-order confirmation email, door sales, and the public
+order-lookup page. Bonus find: the door scanner's `ticket_type_name`
+field for comps was actually the GUEST TYPE's name ("Sponsor"), a
+different concept entirely — fixed to match the paid-order convention.
+
+**Per-pool vocabulary — `unit_label` (0054).** One organizer-set word
+per pool ("Table", "Room", "Area") replacing the hardcoded
+"Section"/"Seat" wording every display used to invent independently —
+the underlying need behind the ticket_type_id fix above for
+whole-table/room-space venues. "Whole table" purchase = the EXISTING
+`seat` grain (individually numbered units), word renamed to "Table" —
+mechanically identical to an assigned seat. "Individual seats at a
+shared table" / "room spaces" = the EXISTING `row`/`table`/`ga` grain
+(sectioned, unassigned), word renamed to "Table"/"Room" — no new grain
+was built (modes derivable from data shouldn't exist, §5). `unit_word`
+replaces "Section" for row-grain pools, "Seat" for seat-grain pools;
+a pool's `row_label`/a section's own `row_label` (looked up per-section,
+NOT assumed from the pool's general field) is always shown as-is
+alongside it, never translated. `OrderItem.section_label` is a
+PURCHASE-TIME SNAPSHOT, not rebuilt on display — fixed at the two
+write sites (`seats.lock_and_claim_section` /
+`lock_and_claim_pass_sections`), not just where it's later read.
+Composer gained a "Call these… (optional)" field at pool CREATION only
+— there is no edit-after-creation flow for pool structure at all today
+(not unique to this field; `row_label`/`sales_grain` are equally
+create-only). Buyer checkout + Door Sales pickers read it; the comp
+Seats picker's tooltip already inherited it automatically via the
+shared `admin_seat_statuses` fix.
+
+**Multi-day comp placement now guarantees the SAME chair every night
+(no migration).** Auto-pick for a seat-grain area used to claim a seat
+in only ONE pool — whichever night the priority walk resolved first —
+so a 3-night guest got a real seat night one and a bare section on
+every other night. `seats.pick_available_seat_family` +
+`seating.sibling_pool_ids_for_days` now find one seat IDENTITY free
+across every night's pool clone, the same guarantee buyer all-days
+seated passes already had (`lock_and_hold_pass_seats`) — wired into
+guest creation, RSVP self-yes, and (transitively) the Guest-list/Invites
+seat picker's new "match all nights" button (below). **Root cause was
+one layer deeper than the symptom**: `seating.effective_allotment()` is
+the ONLY correct source of a guest's per-day quantities (their own
+override rows only if `ticket_allotment_overridden`, else the guest
+TYPE's defaults) — three call sites queried `GuestTicketAllotment`
+directly instead, which is EMPTY for any guest relying on type
+defaults (the common case), silently truncating their day list to one.
+Fixed everywhere it was found; any FUTURE code that needs "what days
+does this guest hold tickets for" must call `effective_allotment`, never
+query the override table directly.
+
+**Explicit organizer choices now get the SAME protections automatic
+placement always had (no migration).** Two related gaps, both because
+an explicit dropdown pick BYPASSES the guest-type priority walk by
+design ("no priority-list magic") — so the walk's guarantees never
+extended to it: (1) a category/section picked on a still-PENDING guest
+used to get silently overwritten the instant they clicked "yes" on
+their own RSVP, since confirmation always re-ran the priority walk from
+scratch — only an actual assigned SEAT was protected before; now a
+preset wins (capacity-rechecked at confirm time, soft-lands into
+`needs_seating` if room disappeared). (2) "Anywhere" (blank section) on
+an explicit pick never resolved an actual section even when the area
+has several with room, because the "spread to the emptiest section"
+heuristic only ever lived inside the priority walk's `allowed_sections`
+handling; new `seating.spread_pick_section` gives explicit `create_guest`
+/`update_guest` the same heuristic directly, and also makes seat-grain
+auto-pick search WITHIN the spread-picked section instead of the whole
+pool.
+
+**Deleting/declining a guest now ALWAYS fully releases their seat (no
+migration, behavior change).** Previously both `delete_guest` and RSVP
+decline only detached a seat (`Seat.guest_id → NULL`), leaving
+`is_blocked`/`block_label` intact — a seat stayed reserved forever
+under a gone or declined guest's name (this is how repeated
+create/delete test cycles accumulated multiple stale "★ reserved seat"
+badges under the same name). New shared `seats.release_seats_for_guest`
+(default `unblock=True`) is now called automatically by both paths —
+no confirmation prompt (an earlier iteration added one; the organizer
+asked for it to just always happen instead). Separately, `update_guest`
+(the grid PATCH) now detects when a guest's placement actually CHANGES
+and releases the stale seat + re-stamps tickets — previously editing a
+confirmed guest's area left their already-sent ticket pointing at the
+OLD seat forever, with no fix even from "Update & resend" (it only
+re-stamps whatever seat the guest CURRENTLY holds).
+
+**Guest-list / Invites seat picker is now day-aware (no migration; new
+endpoint `GET /guests/{id}/seat-days`).** One seat map PER NIGHT for a
+multi-day guest (each night is a separate pool clone) — day tabs let an
+organizer view or move a seat for ONE specific night without touching
+others, plus a "match all nights" button that copies a just-picked
+seat's identity onto every other already-loaded night. The external
+(non-native) guest reveal panel on Guest list gained a third fallback
+tier: an area picked with no section chosen now shows the area's own
+NAME (e.g. "Row 1 Front Center Patron") instead of a dead-end "nothing
+on file" message — matching what a native ticket would show.
+
 ---
 
 ## 2. Inventory math — the definitions (all code-verified)
@@ -300,6 +434,25 @@ the ghosted others into the save; overridden guests' ghosts go silent), and
 last-column `col-flex` slack. External events: Pull column hidden, per-row
 "✓ Tickets sent / Not sent" toggles + sent/not-sent filter instead.
 
+**Guest list's "Seats" action is day-aware** (both Invites and Guest list
+share the same picker component): day tabs for a multi-day guest, each
+showing that NIGHT's own pool clone (not just the guest's "home" night),
+plus a "match all nights" button next to any newly-picked seat that finds
+and selects the same identity across every other loaded night in one
+click. On external (non-native) events, the reveal panel falls through
+three tiers — specific seats, then a chosen section (with the pool's
+`unit_label`/row context), then the AREA'S NAME alone when nothing more
+specific was picked — before finally admitting nothing is on file.
+
+**Door sales** (Manage, gated by Guest-list permission): a tablet-friendly
+screen selling the SAME live catalog a buyer sees, for cash, on the spot —
+full-catalog parity (multi-day, assigned seats, sections, promo codes),
+day chips that LOCK to "All days + tonight only" when it's actually a
+night of the event (so staff can't accidentally sell the wrong night), a
+running "cash collected today" reconciliation total, and on-screen QR
+codes the buyer can walk in on immediately (email is best-effort backup).
+No Stripe transaction of any kind; no platform fee (organizer's call).
+
 **Seats Setup**: NATIVE = type composer + type list + comp-only areas +
 reservations, day chips filtering both lists. NON-NATIVE = the same composer
 as "Add an area" (no price/max/admits/native-fan-out; "Create for every day"
@@ -307,7 +460,12 @@ via pool fan-out) + the "Your room" pool list (structure line, day pill,
 sections editor, seats reserve picker on seat grain, "Every day" action on
 bare pools, Delete) — the old GA-only comp quick-form is replaced there.
 The sections editor and seats picker are ONE shared implementation serving
-both lists (extracted 2026-09-06 — the two surfaces can't drift).
+both lists (extracted 2026-09-06 — the two surfaces can't drift). The
+composer's row/table basis gained an optional "Call these… " field
+(0054's `unit_label`) at pool CREATION time — there is no edit-after-
+creation flow for pool structure at all today (`row_label`/`sales_grain`
+are equally create-only; `api.updateSeatingCategory` is never called
+from the frontend despite existing on the backend).
 
 **Event settings** gained the org-scoped **Payouts card** (status pill,
 Connect/Finish button → Stripe-hosted Express onboarding via one-time
@@ -413,7 +571,7 @@ favor of UTM.
 
 ## 4. Verification harness (the actual safety net)
 
-**Backend**: 32 standalone suites in `test/` — run each with
+**Backend**: 37 standalone suites in `test/` — run each with
 `python3 test/test_X.py` with `DATABASE_URL` set. Local Postgres 16 lives at
 `/tmp/pgdata`, port 5433, socket `/tmp`, db `eventnxt_test`; it dies between
 container sessions — restart:
@@ -459,12 +617,35 @@ Promote-era suites: `test_self_promos` (0042 self-promo guards),
 `test_referral_setup` (referrer fencing, same-email identity, portal payload,
 portal==promo-stats agreement), `test_outreach` (THE attribution policy +
 custom subject/message + payout-agreement payload + the 0051 gate).
+
+Ticket-integrity session suites (2026-09-07): `test_door_sales` (cash-sale
+math, missing-attestation/bad-promo refuse-cleanly, section-label carries
+onto the door-sale response, reconciliation window bucketing);
+`test_multiday_seat_family` (the multi-day same-chair guarantee for
+COMPS — both the explicit-`ticket_allotment` path AND, critically, the
+type-defaults path that an earlier version of the fix missed entirely
+by querying `GuestTicketAllotment` instead of `effective_allotment`);
+`test_comp_ticket_type_labels` (a comp lands on `ticket_type_id`
+correctly for a GA/table type AND an unassigned row-grain type; an
+EXISTING ticket backfills it on "Update & resend", not just fresh
+mints); `test_unit_label` (whole-table "Table 4" on both the organizer's
+seat view and a comp ticket; a row pool's row_label + renamed section
+word together; an unconfigured pool's unchanged default wording).
+Extended in place: `test_guest_seats` (scenario 6 rewritten — RSVP
+decline now fully releases a seat, `status` goes to `available` not
+`reserved`; scenario 8, new — editing a CONFIRMED guest's area releases
+the OLD seat and clears the stale stamp off their ticket);
+`test_section_priorities` (scenario 10 — an organizer preset on a
+still-PENDING guest survives RSVP yes over the type's own priority
+target; scenario 11 — explicit "Anywhere" on a sectioned area spreads
+across sections instead of staying blank forever).
+
 Long-standing anchors: `test_placement`, `test_portal`,
 `test_comp_inventory`, `test_allotment_seating`, `test_section_summary`,
 `test_type_defaults`, `test_compday`, `test_capacity_drift`.
 
 **Frontend**: `crash_hunt.cjs` — jsdom mounts the REAL Dashboard over baked
-fixtures and walks all 13 tabs (fixtures describe a PURE-NATIVE event, so the
+fixtures and walks every tab including Door sales (fixtures describe a PURE-NATIVE event, so the
 settings-gated hidden states are exercised and the muted redirect lines are
 pinned as needles); console errors fail the run. Run:
 `npx vite build && node crash_hunt.cjs`. STATUS RESOLVED 2026-09-06: the repo
@@ -536,6 +717,38 @@ time.
 
 **Intent needs its own column.** When a value can be written by both
 automation and a human choice, the choice gets a dedicated field (0041).
+
+**Query the RESOLVER, not the table it resolves from.** Three separate
+bugs this session (2026-09-07) traced to the same root: code that needed
+"what days does this guest hold tickets for" queried
+`GuestTicketAllotment` (the override table) directly instead of calling
+`effective_allotment()` (which correctly falls through to type
+defaults when there's no override) — silently truncating any type-
+default guest's day list to one. Whenever a resolver function exists
+specifically to hide a fallback chain, querying its underlying table
+directly is the same class of bug as parallel math above — it's not
+computing something different, it's computing the SAME thing wrong by
+skipping the fallback.
+
+**An explicit choice bypassing automation also bypasses automation's
+GUARANTEES, not just its decisions.** "No priority-list magic" for
+explicit picks was working as designed — but it silently meant an
+explicit pick never got the priority walk's "spread to the emptiest
+section" heuristic, and a preset on a pending guest never got the
+"hand-placed guests are never moved" protection RSVP confirm already
+gave an assigned seat. Deliberately skipping automation's DECISION
+doesn't mean its PROTECTIONS should be skipped too — each had to be
+re-added explicitly to the explicit path (`spread_pick_section`, the
+preset-wins-over-priority-walk branch).
+
+**The richer object always wins over its own shadow.** Comp tickets
+were minted from `Guest`/`Seat` with zero reference to `TicketType` —
+the object that actually holds the name/price/admits a person needs to
+see. Whenever two objects can describe the "same" thing (a Guest's
+placement vs. the TicketType that's actually selling it), the display
+should read from whichever one is the source of truth for THAT fact,
+not reconstruct a shadow of it from a cheaper object that happens to be
+on hand.
 
 **Modes that can be derived from data shouldn't exist.** Chooser-ness falls
 out of the numbers; every mode removed is a class of stale combinations gone.
@@ -610,6 +823,12 @@ grep.
 - **0052** `guests.payout_terms_accepted_at` + `payout_terms_legal_name` —
   the payout-terms acceptance wall (codes/links/portal withheld until
   signed with a typed full legal name).
+- **0053** `orders.payment_method`/`sold_by_user_id`/`sold_by_name` —
+  cash door sales (no card, no fee, staffer snapshot).
+- **0054** `seating_categories.unit_label` — one organizer word
+  ("Table"/"Room"/"Area") replacing hardcoded "Section"/"Seat" wording
+  everywhere a ticket, picker, or comp assignment shows it; NULL keeps
+  today's default.
 
 ---
 
@@ -624,7 +843,7 @@ grep.
   NON-NATIVE events (replaced by the full room builder — it remains for
   native events as the press-row/holds panel).
 - **NEEDS-MIGRATION-FIRST — the `select` mode kill (spec'd, awaiting go)**:
-  migration **0053+** (renumbered a FIFTH time: 0045→0047→0048→0049-0052
+  migration **0055+** (renumbered a SIXTH time: 0045→0047→0048→0049-0052→0053-0054
   got used) converts `guest_mode='select'` → `'invite'`; then delete the
   mode from `comp_tickets.py` (GUEST_MODES + ~5 branches), the
   `schemas/guest.py` literals, the RSVP chooser fallback
@@ -647,10 +866,30 @@ grep.
 - **FashioNXT dry run** on the deployed app with real casting data —
   STRONGEST recommendation before any new feature work; it now
   rehearses the ENTIRE money path (connect → sell → refund → release),
-  PDFs (`requirements.txt` must be deployed for the PDF deps), AND the
+  PDFs (`requirements.txt` must be deployed for the PDF deps), the
   external path (build the Ticket Tomato-mirroring room, fan out days,
   import a real export, watch per-night reconciliation + referral
-  attribution).
+  attribution), AND now the ticket-integrity surface (multi-day comp
+  seat-family matching, ticket_type_id labeling, `unit_label` wording).
+- **Champagne Lounge (or any GA/table pool wanting real per-unit
+  identity) needs manual reconfiguration** — the mechanism (seat-grain +
+  `unit_label`) is built and ready, but converting an EXISTING flat-
+  headcount pool into individually-numbered "tables" is an organizer
+  action in Seats Setup; no automated conversion path was built or
+  requested (still testing, 4 sales so far, retroactive fixup explicitly
+  declined as not needed yet).
+- **Pool structure has no edit-after-creation UI at all** — `unit_label`,
+  `row_label`, `sales_grain` are all create-time-only fields via the
+  composer; `updateSeatingCategory` exists on the backend but is never
+  called from the frontend. Worth a real edit flow if pools keep needing
+  correction after the fact (this session's own testing hit this: an
+  organizer wanting to rename or reclassify a pool had to work around it).
+- **Allotment recipients' "no section chosen" fallback is first-fit, not
+  spread-to-emptiest** (`resolve_parent_override`) — inconsistent with
+  the spread heuristic used everywhere else, but NOT the same bug as the
+  "Anywhere" gap fixed this session (it was already resolving to a real
+  section, just not the emptiest one). Left as-is; worth aligning if it
+  ever produces a visibly lopsided allotment.
 - **Real Ticket Tomato export verification** — the importer was built
   against the dashboard's known shape (screenshot-verified columns);
   first real file may need one header alias at most. Confirm whether
@@ -683,7 +922,7 @@ grep.
 - **Stripe Tax** — parked until the first event in a taxing state
   (Oregon home base = no sales tax); agreement's tax clause + a CPA
   hour at that milestone.
-- **`select`-mode kill** — spec above (§7), now 0053+, needs Joshua's
+- **`select`-mode kill** — spec above (§7), now 0055+, needs Joshua's
   explicit go.
 - **Rebuild `multiday_smoke.cjs`** against current code (original lost);
   an external-fixture crash_hunt pass is a related candidate.
