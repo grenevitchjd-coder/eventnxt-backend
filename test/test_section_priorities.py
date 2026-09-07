@@ -9,6 +9,8 @@
 #   6. unknown labels refused on both priority add and explicit placement
 #   7. restructure that removes a label: resolver skips it, nothing 500s
 #   8. seat-grain pools: room = free unblocked seats minus seatless comps
+#   9. seat-grain auto-pick: a confirmed comp in a seat-grain section
+#      lands on a REAL seat, not just the section name (2026-09 fix)
 #
 # Run: DATABASE_URL="postgresql://test@/eventnxt_test?host=/tmp&port=5433" python3 test/test_section_priorities.py
 import os
@@ -177,6 +179,28 @@ def main():
     r = add_guest(gty["id"], "No Room", 1)
     check("seat pool: next guest refused (free 2 - seatless comps 2 = 0)",
           r.status_code == 400 and "full" in r.text, r.text)
+
+    # ---- 9. seat-grain auto-pick: a real seat, not just a section name ----
+    p3 = client.post(
+        f"/events/{EV}/seating-categories",
+        json={"name": "Balcony", "capacity": 1, "sales_grain": "seat"},
+        headers=H,
+    ).json()
+    client.put(
+        f"/events/{EV}/seating-categories/{p3['id']}/sections",
+        json={"sections": [{"section_label": "K", "row_label": None, "capacity": 5}]},
+        headers=H,
+    )
+    gtz = client.post(f"/events/{EV}/guest-types", json={"name": "Press", "guest_mode": "invite"}, headers=H).json()
+    client.post(f"/events/{EV}/guest-types/{gtz['id']}/seating-priorities",
+                json={"seating_category_id": p3["id"], "section_label": "K"}, headers=H)
+    gz1 = add_guest(gtz["id"], "Casey Comp", 1).json()
+    check("auto-pick: section still resolves", gz1.get("section_label") == "K", gz1)
+    check("auto-pick: a REAL seat landed on the guest, not just the section",
+          len(gz1.get("seat_labels") or []) == 1, gz1.get("seat_labels"))
+    gz2 = add_guest(gtz["id"], "Robin Comp", 1).json()
+    check("auto-pick: a second guest gets a DIFFERENT seat",
+          gz2.get("seat_labels") and gz2["seat_labels"] != gz1["seat_labels"], (gz1.get("seat_labels"), gz2.get("seat_labels")))
 
     print()
     if failures:

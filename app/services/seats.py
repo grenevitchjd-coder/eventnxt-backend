@@ -359,6 +359,63 @@ def assign_guest_seats(db: Session, *, guest, seat_ids: list[uuid.UUID]) -> list
     return wanted
 
 
+def pick_available_seats(db: Session, category_id, section_label: str | None, count: int) -> list[uuid.UUID]:
+    """
+    Lowest row/seat-number-first pick of up to `count` free seats in a
+    SEAT-GRAIN category — free meaning unassigned to any guest, not
+    blocked, and not sold/held by a buyer. Restricted to one section
+    when a section was chosen; a pool-level priority (no section) for a
+    seat pool searches the whole pool instead.
+
+    Used to auto-complete a comp placement that only resolved to a
+    pool/section: the priority walk and resolve_parent_override both
+    stop at (category, section_label) — deliberately, they're grain-
+    agnostic — so every comp landing in a seat-grain area needs this
+    extra step or it ships with a section name and no actual seat
+    (2026-09 fix). May return fewer than `count` if the section is
+    tighter than the room-check believed (a genuine race, not the
+    common case — section_room_for_comps already counts free seats for
+    seat-grain pools before this ever runs).
+    """
+    q = db.query(Seat).filter(
+        Seat.seating_category_id == category_id,
+        Seat.guest_id.is_(None),
+        Seat.is_blocked.is_(False),
+    )
+    if section_label is not None:
+        q = q.filter(Seat.section_label == section_label)
+    candidates = (
+        q.order_by(Seat.section_label, Seat.row_label, Seat.seat_number).with_for_update().all()
+    )
+    taken = taken_seat_ids(db, [s.id for s in candidates])
+    return [s.id for s in candidates if s.id not in taken][:count]
+
+
+def take_held_seats(db: Session, holder_id, category_id, section_label, recipient, count: int) -> list[uuid.UUID]:
+    """
+    Transfer up to `count` seats an allotment HOLDER already reserved
+    (via hold_seats_for_allotment — real seats, not just a headcount) to
+    a named RECIPIENT — lowest seat-number first, so recipients named
+    in sequence land adjacent to each other exactly as the holder's
+    block was reserved, instead of each recipient racing the general
+    pool separately and landing scattered. Silently transfers fewer
+    than `count` (even zero) when the holder doesn't hold that many
+    there — the caller picks fresh seats from the pool for the
+    shortfall, so a recipient is never blocked by this alone.
+    """
+    q = db.query(Seat).filter(Seat.seating_category_id == category_id, Seat.guest_id == holder_id)
+    if section_label is not None:
+        q = q.filter(Seat.section_label == section_label)
+    held = q.order_by(Seat.row_label, Seat.seat_number).with_for_update().limit(count).all()
+    for seat in held:
+        seat.guest_id = recipient.id
+        if not seat.block_label:
+            seat.block_label = recipient.name
+    if held:
+        restamp_guest_tickets(db, recipient)
+    return [s.id for s in held]
+
+
 def sync_seats_for_pool(db: Session, category: SeatingCategory) -> None:
     """
     Make the seats table match the pool's sections. Called inside the

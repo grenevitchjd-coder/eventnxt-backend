@@ -12,6 +12,7 @@ from app.models.guest_type import GuestType
 from app.models.promo_code import PromoCode, RewardType
 from app.models.reward_redemption import RewardRedemption
 from app.models.guest_ticket_request import GuestTicketRequest
+from app.models.seating_category import SeatingCategory
 from app.schemas.rsvp import (
     PayoutTermsAcceptRequest,
     DealBonusTier,
@@ -417,6 +418,15 @@ def respond_to_rsvp(token: str, payload: RSVPRespondRequest, db: Session = Depen
             guest.allocation_status = GuestAllocationStatus.CONFIRMED
             guest.rsvp_confirmed = "yes"
             guest.needs_seating = False
+            # A comp landing in a SEAT-GRAIN area needs a REAL seat, not
+            # just a section name — the priority walk is deliberately
+            # grain-agnostic and stops at (category, section). Auto-pick
+            # completes it here (2026-09 fix).
+            _cat = db.query(SeatingCategory).filter(SeatingCategory.id == new_category_id).first()
+            if _cat and _cat.sales_grain == "seat":
+                picked = seats_service.pick_available_seats(db, new_category_id, new_section_label, guest.party_size)
+                if picked:
+                    seats_service.assign_guest_seats(db, guest=guest, seat_ids=picked)
             # Selling through EventNXT: a confirmed yes mints and emails
             # real admission codes (same table and format as paid tickets,
             # so Find My Tickets and future QR check-in treat comps
@@ -553,6 +563,8 @@ def distribute_tickets(token: str, payload: RSVPDistributeRequest, db: Session =
     # they stay pending with needs_seating so the organizer's queue
     # catches them and no phantom seat is counted.
     parent_cohort = bool(guest.cohort_together)
+    from app.services import seats as seats_service
+
     for c in children:
         new_category_id, new_section_label = seating.resolve_parent_override(
             db, guest, c.party_size, c.visit_date
@@ -572,6 +584,26 @@ def distribute_tickets(token: str, payload: RSVPDistributeRequest, db: Session =
         c.allocation_status = GuestAllocationStatus.CONFIRMED
         c.rsvp_confirmed = "yes"
         c.needs_seating = False
+        # A comp landing in a SEAT-GRAIN area needs a REAL seat, not just
+        # a section name — resolve_parent_override/resolve_seating_placement
+        # are deliberately grain-agnostic and stop at (category, section).
+        # FIRST draw from whatever the holder already reserved for "hold
+        # now" (hold_seats_for_allotment) — that's the guaranteed
+        # adjacent block sponsors are promised; only pick fresh from the
+        # general pool for any shortfall (2026-09 fix). Flushed below
+        # before the NEXT sibling picks, so two recipients never land on
+        # the same seat.
+        _cat = db.query(SeatingCategory).filter(SeatingCategory.id == new_category_id).first()
+        if _cat and _cat.sales_grain == "seat":
+            transferred = seats_service.take_held_seats(db, guest.id, new_category_id, new_section_label, c, c.party_size)
+            remaining = c.party_size - len(transferred)
+            if remaining > 0:
+                # assign_guest_seats WHOLESALE-replaces — must pass the
+                # transferred seats too, or they'd read as "released"
+                # (current but not in the new list) and get freed again.
+                picked = seats_service.pick_available_seats(db, new_category_id, new_section_label, remaining)
+                if picked:
+                    seats_service.assign_guest_seats(db, guest=c, seat_ids=transferred + picked)
         # Placements happen back-to-back in this one request — flush so
         # the NEXT sibling's room math sees this one (spread placement
         # was packing everyone into the same section without it).

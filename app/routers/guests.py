@@ -192,9 +192,36 @@ def create_guest(
     db.add(guest)
     db.flush()  # assigns guest.id without committing, needed for the FK below
 
+    # A comp landing in a SEAT-GRAIN area needs a REAL seat, not just a
+    # section name — the priority walk (and resolve_parent_override,
+    # elsewhere) is deliberately grain-agnostic and stops at
+    # (category, section). Auto-pick completes it here so the ticket
+    # that ends up sent always names an actual seat (2026-09 fix).
+    # Distribute-mode holders are placeholder entities — they don't
+    # personally attend, so they're excluded here; their recipients get
+    # real seats via hold_seats_for_allotment / the distribute loop below.
+    if (
+        effective_seating_category_id
+        and payload.allocation_status == "confirmed"
+        and payload.guest_mode != "distribute"
+    ):
+        _cat = db.query(SeatingCategory).filter(SeatingCategory.id == effective_seating_category_id).first()
+        if _cat and _cat.sales_grain == "seat":
+            picked = seats_service.pick_available_seats(
+                db, effective_seating_category_id, effective_section_label, payload.party_size
+            )
+            if picked:
+                seats_service.assign_guest_seats(db, guest=guest, seat_ids=picked)
+
     if payload.ticket_allotment is not None:
         _validate_allotment_days(db, event_id, payload.ticket_allotment)
         seating.replace_guest_ticket_allotment(db, guest.id, payload.ticket_allotment)
+        # "Hold now" for a seat-grain day means a REAL block of adjacent
+        # seats reserved immediately, not just a headcount — so named
+        # recipients later draw from a guaranteed block instead of each
+        # racing the general pool separately and landing scattered.
+        if payload.guest_mode == "distribute" and guest.hold_timing == "now":
+            seating.hold_seats_for_allotment(db, guest)
 
     # Auto-send delivery (Event settings): the moment an invite/select
     # guest with a resolved seat is added to a native-ticketing event,
@@ -302,6 +329,11 @@ def update_guest(
         _validate_allotment_days(db, event_id, payload.ticket_allotment)
         guest.ticket_allotment_overridden = True
         seating.replace_guest_ticket_allotment(db, guest.id, payload.ticket_allotment)
+        # Same "hold now means real seats, not just a headcount" rule as
+        # creation — covers raising a sponsor's budget, or flipping
+        # hold_timing to "now" after the fact.
+        if guest.guest_mode == "distribute" and guest.hold_timing == "now":
+            seating.hold_seats_for_allotment(db, guest)
 
     db.commit()
     db.refresh(guest)

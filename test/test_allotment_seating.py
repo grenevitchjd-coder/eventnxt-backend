@@ -136,6 +136,39 @@ client.patch(f"/events/{EV}/guests/{h1['id']}", json={
 info = client.get(f"/public/rsvp/{h1['rsvp_token']}").json()
 check("holder portal payload carries spend_total", info.get("is_allotment_holder") and info.get("spend_total") == 7, str(info.get("spend_total")))
 
+# --- 5. "hold now" on a SEAT-GRAIN pool reserves a REAL adjacent block for
+#        the holder up front, and named recipients draw FROM that block
+#        (in order, so they land adjacent) instead of the general pool ---
+vip = client.post(f"/events/{EV}/seating-categories", json={"name": "VIP", "capacity": 6, "sales_grain": "seat"}, headers=H).json()
+client.put(f"/events/{EV}/seating-categories/{vip['id']}/sections", json={"sections": [{"section_label": "V", "capacity": 6}]}, headers=H)
+gt2 = client.post(f"/events/{EV}/guest-types", json={"name": "Sponsor VIP", "guest_mode": "distribute"}, headers=H).json()
+client.post(f"/events/{EV}/guest-types/{gt2['id']}/seating-priorities", json={"seating_category_id": vip["id"], "section_label": "V"}, headers=H)
+
+h3 = client.post(f"/events/{EV}/guests", json={"name": "Vip Sponsor", "email": "vipsponsor@x.com", "guest_type_id": gt2["id"], "allocation_status": "confirmed", "party_size": 1, "guest_mode": "distribute"}, headers=H).json()
+client.patch(f"/events/{EV}/guests/{h3['id']}", json={
+    "name": h3["name"], "email": h3["email"], "guest_type_id": gt2["id"],
+    "seating_category_id": None, "section_label": None, "visit_date": None,
+    "allocation_status": "confirmed", "party_size": 1, "perks": None, "comments": None,
+    "guest_mode": "distribute", "hold_timing": "now", "spend_total": None, "cohort_together": True,
+    "ticket_allotment": [{"date": D1, "quantity": 4}],
+}, headers=H)
+h3_full = [x for x in client.get(f"/events/{EV}/guests", headers=H).json() if x["id"] == h3["id"]][0]
+check("hold-now claimed 4 REAL seats for the holder, not just a headcount",
+      len(h3_full.get("seat_labels") or []) == 4, h3_full.get("seat_labels"))
+
+# distribute 2 singles — each should draw from the holder's reserved
+# block (their seat lands in VIP/V, and the holder's remaining held
+# count drops by exactly one per recipient) rather than picking fresh.
+rv1 = give_and_rsvp(h3_full, "Vip One", D1)
+rv2 = give_and_rsvp(h3_full, "Vip Two", D1)
+check("recipient 1 got a real seat from the reserved block",
+      len(rv1.get("seat_labels") or []) == 1 and "Section V" in rv1["seat_labels"][0], rv1.get("seat_labels"))
+check("recipient 2 got a DIFFERENT real seat", rv2.get("seat_labels") and rv2["seat_labels"] != rv1["seat_labels"],
+      (rv1.get("seat_labels"), rv2.get("seat_labels")))
+h3_after = [x for x in client.get(f"/events/{EV}/guests", headers=H).json() if x["id"] == h3["id"]][0]
+check("holder's held block shrank by exactly the 2 seats handed out",
+      len(h3_after.get("seat_labels") or []) == 2, h3_after.get("seat_labels"))
+
 print()
 if failures:
     print(f"FAILED: {len(failures)}")

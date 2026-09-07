@@ -740,6 +740,51 @@ def replace_guest_ticket_allotment(db: Session, guest_id: str, items) -> None:
     db.flush()
 
 
+def hold_seats_for_allotment(db: Session, holder) -> list:
+    """
+    "Hold tickets now" for a distribute-mode guest (a sponsor/allotment
+    entity) currently only reserved a HEADCOUNT — for a SEAT-GRAIN day,
+    that let recipients get scattered whichever seats happened to be
+    free at the moment each was named, never guaranteed to sit
+    together. This claims REAL seats for the holder up front, one pass
+    per day of their ticket_allotment, using the EXACT resolution a
+    recipient of that size would get (recipient override first, else
+    the guest type's own priority walk) — so what's reserved is what
+    recipients would actually land in, just claimed as one adjacent
+    block (pick_available_seats is lowest-seat-number-first) instead of
+    piecemeal. Non-seat-grain days and days with no room are silently
+    skipped — this never blocks the holder from being added. Already-
+    held seats are left alone (additive, not a wholesale replace).
+    Distribution then draws recipients FROM this held block (see
+    routers/rsvp.py) rather than the general pool.
+    """
+    from app.models.guest_ticket_allotment import GuestTicketAllotment
+    from app.services import seats as seats_service
+
+    rows = db.query(GuestTicketAllotment).filter(GuestTicketAllotment.guest_id == holder.id).all()
+    if not rows:
+        return []
+    existing_ids = [s.id for s in seats_service.guest_seats(db, holder.id)]
+    new_ids: list = []
+    for row in rows:
+        if row.quantity <= 0:
+            continue
+        category_id, section_label = resolve_parent_override(db, holder, row.quantity, row.date)
+        if category_id is None:
+            category_id, section_label = resolve_seating_placement(
+                db, str(holder.event_id), str(holder.guest_type_id), party_size=row.quantity, visit_date=row.date,
+            )
+        if category_id is None:
+            continue
+        category = db.query(SeatingCategory).filter(SeatingCategory.id == category_id).first()
+        if not category or category.sales_grain != "seat":
+            continue
+        new_ids.extend(seats_service.pick_available_seats(db, category_id, section_label, row.quantity))
+    if new_ids:
+        seats_service.assign_guest_seats(db, guest=holder, seat_ids=existing_ids + new_ids)
+    return new_ids
+
+
 def allotment_distributed_total(db: Session, parent_guest_id: str) -> int:
     """Heads already handed out by this distributor across every day —
     the counterpart of the per-day ledger, for the TOTAL budget cap."""
