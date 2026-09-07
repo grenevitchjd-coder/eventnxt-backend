@@ -220,6 +220,8 @@ class AdminOrderResponse(BaseModel):
     paid_at: Optional[datetime] = None
     refunded_at: Optional[datetime] = None
     marketing_opt_in: bool = False  # §7 consent, shown to the organizer
+    payment_method: str = "stripe"  # 'stripe' or 'cash' (door sales, 0053)
+    sold_by_name: Optional[str] = None  # staffer who rang up a cash sale
 
 # ---------- Assigned-seat picker ----------
 
@@ -239,3 +241,55 @@ class PublicSeatSectionResponse(BaseModel):
 class PublicSeatMapResponse(BaseModel):
     ticket_type_id: uuid.UUID
     sections: list[PublicSeatSectionResponse] = []
+
+
+# ---------- Door sales (cash, in-person) ----------
+
+
+class DoorSaleRequest(BaseModel):
+    """
+    Mirrors CheckoutRequest, minus everything Stripe/buyer-self-serve
+    specific: no terms_accepted checkbox (staff attests instead, see
+    staff_attested_terms) and no referral_contact_token (there's no
+    tracked link at a walk-up register — a typed promo_code still works
+    for attribution).
+    """
+
+    buyer_name: str
+    buyer_email: EmailStr
+    items: list[CheckoutItemRequest] = Field(min_length=1)
+    promo_code: Optional[str] = None
+    marketing_opt_in: bool = False
+    # Staff attesting the buyer accepted the Ticket Purchasing Agreement
+    # (organizer's explicit choice: no buyer-facing tablet flow for this
+    # v1). Required true, same 400-not-silent-skip discipline as the
+    # buyer's own checkbox online.
+    staff_attested_terms: bool = False
+
+
+class DoorSaleTicketResponse(BaseModel):
+    """Enough for the door screen to render an on-screen QR immediately
+    — the buyer walks in on this screen, the emailed PDFs are the backup."""
+
+    code: str
+    ticket_type_name: str
+    seat_label: Optional[str] = None
+    valid_date: Optional[str] = None
+
+
+class DoorSaleResponse(BaseModel):
+    order_token: str
+    total_cents: int  # what was actually collected in cash
+    email_sent: bool
+    tickets: list[DoorSaleTicketResponse] = []
+
+
+class DoorSalesReconciliationResponse(BaseModel):
+    """One total for the given date — the organizer's own call: no
+    per-staff breakdown for now (agreedTotal-style attribution can be
+    added later from sold_by_name if wanted)."""
+
+    date: str
+    cash_total_cents: int
+    ticket_count: int
+    sale_count: int  # number of orders, distinct from ticket_count

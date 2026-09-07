@@ -95,6 +95,15 @@ class Order(Base):
 
     order_token = Column(String, nullable=False, unique=True, index=True)
 
+    # Cash door sales (0053): 'stripe' (default) or 'cash' — a staff
+    # member rang this up in person, no Stripe transaction exists at
+    # all. sold_by_* is a snapshot (who + display name) of the staffer
+    # who processed it, same discipline as every other money snapshot
+    # on this model — never a live lookup back to Events360.
+    payment_method = Column(String, nullable=False, default="stripe", server_default="stripe")
+    sold_by_user_id = Column(UUID(as_uuid=True), nullable=True)
+    sold_by_name = Column(String, nullable=True)
+
     expires_at = Column(DateTime(timezone=True), nullable=True)  # pending-hold deadline; null once paid
     paid_at = Column(DateTime(timezone=True), nullable=True)
     refunded_at = Column(DateTime(timezone=True), nullable=True)

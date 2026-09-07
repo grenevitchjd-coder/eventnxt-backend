@@ -80,8 +80,21 @@ def run():
     check(c, "get", f"/events/{EV}/promo-stats", True, "money read denied")
     check(c, "get", f"/events/{EV}/promo-codes", True, "promotion read denied")
     check(c, "get", f"/events/{EV}/orders", True, "orders denied")
+    # Door sales (0053): rides guest_list, same view/manage split as the
+    # rest of the sweep — view can browse the catalog and check the day's
+    # reconciliation, but ringing up an actual sale needs manage.
+    check(c, "get", f"/events/{EV}/door-sales/catalog", False, "door-sales catalog with guest_list.view")
+    check(c, "get", f"/events/{EV}/door-sales/reconciliation?start=2026-01-01T00:00:00Z&end=2026-01-02T00:00:00Z", False, "door-sales reconciliation with guest_list.view")
+    check(c, "post", f"/events/{EV}/door-sales/sell", True, "door-sales sell denied (view only)")
     done(c)
     print("1. door staff profile: PASS")
+
+    # 1b. guest_list.manage: can actually ring up a sale
+    c = client_with({"all": False, "org_wide": ["eventnxt.guest_list.manage"], "by_event": {}})
+    check(c, "post", f"/events/{EV}/door-sales/sell", False, "door-sales sell allowed with guest_list.manage")
+    check(c, "get", f"/events/{EV}/door-sales/catalog", False, "door-sales catalog via manage-implies-view")
+    done(c)
+    print("1b. door sales needs guest_list.manage to sell: PASS")
 
     # 2. Manage implies view server-side: guests.manage alone can READ guests
     c = client_with({"all": False, "org_wide": ["eventnxt.guests.manage"], "by_event": {}})

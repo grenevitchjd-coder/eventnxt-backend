@@ -66,6 +66,8 @@ def _serialize(order: Order, items: list[OrderItem], ticket_count: int) -> Admin
         created_at=order.created_at,
         paid_at=order.paid_at,
         refunded_at=order.refunded_at,
+        payment_method=order.payment_method or "stripe",
+        sold_by_name=order.sold_by_name,
     )
 
 
@@ -178,15 +180,21 @@ def refund_order(
     db.commit()
 
     # Best-effort notice to the buyer — the refund stands regardless.
+    # Cash orders never had a card on file, so the "5-10 business days"
+    # card-refund language would be actively wrong for them (0053).
+    refund_note = (
+        "Please see the organizer to receive your cash refund."
+        if order.payment_method == "cash"
+        else "The amount will return to your original payment method (card refunds typically take 5-10 business days to appear)."
+    )
     try:
         send_email(
             to=order.buyer_email,
             subject="Your order was refunded",
             text_body=(
                 f"Hi {order.buyer_name},\n\n"
-                f"Your order has been refunded in full. The amount will return to your "
-                f"original payment method (card refunds typically take 5-10 business days "
-                f"to appear).\n\nThe ticket codes from this order are no longer valid.\n\n— EventNXT"
+                f"Your order has been refunded in full. {refund_note}\n\n"
+                f"The ticket codes from this order are no longer valid.\n\n— EventNXT"
             ),
         )
     except (EmailNotConfigured, EmailSendError):

@@ -29,9 +29,12 @@ from app.config import settings
 from app.models.order import Order, OrderStatus
 from app.models.order_item import OrderItem
 from app.models.pass_member import PassMember
+from app.models.seat import Seat
 from app.models.seating_category import SeatingCategory
 from app.models.ticket import Ticket, TicketStatus
 from app.models.ticket_type import TicketType
+from app.models.zone_section import ZoneSection
+from app.services import seating
 from app.services import seats as seats_service
 from app.services.email import EmailNotConfigured, EmailSendError, send_email
 
@@ -220,6 +223,203 @@ def pass_members_for(db: Session, ticket_type_ids: list) -> dict:
     for pid in out:
         out[pid].sort(key=lambda m: m.valid_date or "")
     return out
+
+
+def ticket_catalog(db: Session, event_id) -> list:
+    """
+    The picker's data, event-scoped rather than slug/published-scoped —
+    shared by the PUBLIC picker (checkout.list_public_ticket_types,
+    which resolves a published slug to an event_id first) and the
+    authenticated door-sales screen (which already has the event_id and
+    sells regardless of publish state). One source so the two surfaces
+    can never show different availability for the same event — the
+    house rule against parallel math.
+    """
+    from app.schemas.ticketing import PublicPassNight, PublicTicketSectionOption, PublicTicketTypeResponse
+
+    ticket_types = (
+        db.query(TicketType)
+        .filter(TicketType.event_id == event_id, TicketType.is_active.is_(True))
+        .order_by(TicketType.sort_order, TicketType.created_at)
+        .all()
+    )
+    avail = availability_for(db, ticket_types) if ticket_types else {}
+    pool_ids = [t.seating_category_id for t in ticket_types if t.seating_category_id]
+    pools = db.query(SeatingCategory).filter(SeatingCategory.id.in_(pool_ids)).all() if pool_ids else []
+    assigned_pool_ids = {c.id for c in pools if c.sales_grain == "seat"}
+    pools_by_id = {c.id: c for c in pools}
+    section_pool_ids = seats_service.section_required_pool_ids(db, pool_ids)
+    sections_by_pool = {}
+    if section_pool_ids:
+        for sec in (
+            db.query(ZoneSection)
+            .filter(ZoneSection.seating_category_id.in_(list(section_pool_ids)))
+            .order_by(ZoneSection.sort_order)
+            .all()
+        ):
+            sections_by_pool.setdefault(sec.seating_category_id, []).append(
+                PublicTicketSectionOption(
+                    id=sec.id,
+                    section_label=sec.section_label,
+                    row_label=sec.row_label,
+                    remaining=max(
+                        sec.capacity
+                        - seats_service.section_heads_taken(db, sec.id)
+                        # comp holds (confirmed + pending hold-now) — the
+                        # number shown must match what checkout will allow
+                        - seating.guest_hold_heads(db, pools_by_id[sec.seating_category_id], sec.section_label),
+                        0,
+                    ),
+                )
+            )
+    pass_map = pass_members_for(db, [t.id for t in ticket_types])
+    pass_ids = set(pass_map.keys())
+    # Passes over ASSIGNED families keep the seat picker; passes over
+    # SECTIONED families instead get per-night section options (the
+    # buyer picks a section for each night — different views welcome).
+    seat_pass_ids: set = set()
+    pass_nights_by_id: dict = {}
+    for pid, members in pass_map.items():
+        mpool_ids = [m.seating_category_id for m in members if m.seating_category_id]
+        mpools = [pools_by_id.get(i) or db.query(SeatingCategory).get(i) for i in mpool_ids]
+        if mpools and len(mpools) == len(members) and all(p and p.sales_grain == "seat" for p in mpools):
+            seat_pass_ids.add(pid)
+            continue
+        sectioned = seats_service.section_required_pool_ids(db, mpool_ids)
+        if not sectioned:
+            continue  # GA family: plain quantity stepper, min-night availability
+        nights = []
+        for m in members:
+            opts = []
+            pool = next((p for p in mpools if p and p.id == m.seating_category_id), None)
+            for sec in (
+                db.query(ZoneSection)
+                .filter(ZoneSection.seating_category_id == m.seating_category_id)
+                .order_by(ZoneSection.sort_order)
+                .all()
+            ):
+                opts.append(
+                    PublicTicketSectionOption(
+                        id=sec.id,
+                        section_label=sec.section_label,
+                        row_label=sec.row_label,
+                        remaining=max(
+                            sec.capacity
+                            - seats_service.section_heads_taken(db, sec.id)
+                            - (seating.guest_hold_heads(db, pool, sec.section_label) if pool else 0),
+                            0,
+                        ),
+                    )
+                )
+            nights.append(PublicPassNight(date=m.valid_date, sections=opts))
+        pass_nights_by_id[pid] = nights
+    return [
+        PublicTicketTypeResponse(
+            id=t.id,
+            name=t.name,
+            description=t.description,
+            price_cents=t.price_cents,
+            currency=t.currency,
+            max_per_order=t.max_per_order,
+            admits=t.admits or 1,
+            valid_date=t.valid_date,
+            assigned_seating=(t.seating_category_id in assigned_pool_ids) or (t.id in seat_pass_ids),
+            section_required=t.seating_category_id in section_pool_ids,
+            sections=sections_by_pool.get(t.seating_category_id, []),
+            pass_nights=pass_nights_by_id.get(t.id, []),
+            available=avail[t.id]["available"],
+            on_sale=is_on_sale(t, avail[t.id]["available"]),
+        )
+        for t in ticket_types
+    ]
+
+
+def seat_map_for_type(db: Session, event_id, ticket_type_id):
+    """
+    The seat picker's data for one ticket type, event-scoped — the same
+    shared-vs-duplicated split as ticket_catalog above. Raises
+    CheckoutError (caller maps to 404) when the type doesn't exist for
+    this event or isn't seat-sold.
+    """
+    from app.schemas.ticketing import PublicSeatMapResponse, PublicSeatResponse, PublicSeatSectionResponse
+
+    tt = db.query(TicketType).filter(TicketType.id == ticket_type_id, TicketType.event_id == event_id).first()
+    if not tt:
+        raise CheckoutError("Ticket type not found.")
+    members = pass_members_for(db, [tt.id]).get(tt.id)
+    if members:
+        # Derived pass: the map is the FIRST night's seats, and a seat is
+        # available only when its identity is free (not taken, not
+        # blocked) on EVERY night. Serving night-1 seat ids keeps the
+        # picker unchanged — checkout resolves siblings server-side.
+        pool_ids = [m.seating_category_id for m in members]
+        all_seats = (
+            db.query(Seat)
+            .filter(Seat.seating_category_id.in_(pool_ids))
+            .order_by(Seat.section_label, Seat.row_label, Seat.seat_number)
+            .all()
+        )
+        taken = seats_service.taken_seat_ids(db, [s.id for s in all_seats])
+        free_identities_per_pool = {}
+        counts = {}
+        for s in all_seats:
+            ident = (s.section_label, s.row_label, s.seat_number)
+            counts[ident] = counts.get(ident, 0) + 1
+            if s.id not in taken and not s.is_blocked:
+                free_identities_per_pool[ident] = free_identities_per_pool.get(ident, 0) + 1
+        n = len(pool_ids)
+        grouped = {}
+        for s in all_seats:
+            if s.seating_category_id != pool_ids[0]:
+                continue
+            grouped.setdefault((s.section_label, s.row_label), []).append(s)
+        return PublicSeatMapResponse(
+            ticket_type_id=tt.id,
+            sections=[
+                PublicSeatSectionResponse(
+                    section_label=sec,
+                    row_label=row,
+                    seats=[
+                        PublicSeatResponse(
+                            id=x.id,
+                            seat_number=x.seat_number,
+                            available=(
+                                counts.get((x.section_label, x.row_label, x.seat_number), 0) == n
+                                and free_identities_per_pool.get((x.section_label, x.row_label, x.seat_number), 0) == n
+                            ),
+                        )
+                        for x in xs
+                    ],
+                )
+                for (sec, row), xs in grouped.items()
+            ],
+        )
+    if not tt.seating_category_id:
+        raise CheckoutError("Ticket type not found.")
+    seats = (
+        db.query(Seat)
+        .filter(Seat.seating_category_id == tt.seating_category_id)
+        .order_by(Seat.section_label, Seat.row_label, Seat.seat_number)
+        .all()
+    )
+    taken = seats_service.taken_seat_ids(db, [s.id for s in seats])
+    grouped = {}
+    for seat in seats:
+        grouped.setdefault((seat.section_label, seat.row_label), []).append(seat)
+    return PublicSeatMapResponse(
+        ticket_type_id=tt.id,
+        sections=[
+            PublicSeatSectionResponse(
+                section_label=sec,
+                row_label=row,
+                seats=[
+                    PublicSeatResponse(id=x.id, seat_number=x.seat_number, available=(x.id not in taken and not x.is_blocked))
+                    for x in xs
+                ],
+            )
+            for (sec, row), xs in grouped.items()
+        ],
+    )
 
 
 def create_pending_order(
