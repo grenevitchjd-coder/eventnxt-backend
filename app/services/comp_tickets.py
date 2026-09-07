@@ -15,6 +15,7 @@ from app.models.event_settings import EventSettings
 from app.models.guest import Guest
 from app.models.guest_type import GuestType
 from app.models.ticket import Ticket, TicketStatus
+from app.models.ticket_type import TicketType
 from app.services.ticketing import generate_ticket_code
 from app.config import settings as app_settings
 
@@ -172,6 +173,12 @@ def issue_comp_tickets(db: Session, guest: Guest) -> list[Ticket]:
 
     from app.services import seating
 
+    def _ticket_type_for(day) -> TicketType | None:
+        if not guest.seating_category_id:
+            return None
+        category_id = seating.pool_for_day(db, guest.seating_category_id, day) if day else guest.seating_category_id
+        return seating.ticket_type_for_area_day(db, category_id, day)
+
     allot = seating.effective_allotment(db, guest)
     mode = effective_guest_mode(db, guest, allot)
     if days and allot and mode in ("invite", "select") and not has_undated:
@@ -187,6 +194,7 @@ def issue_comp_tickets(db: Session, guest: Guest) -> list[Ticket]:
         for day, qty in sorted(allot.items()):
             if day not in days:
                 continue  # a stale grant outside the event's days mints nothing
+            tt = _ticket_type_for(day)
             for _ in range(max(0, qty - by_day.get(day, 0))):
                 t = Ticket(
                     guest_id=guest.id,
@@ -194,6 +202,7 @@ def issue_comp_tickets(db: Session, guest: Guest) -> list[Ticket]:
                     code=generate_ticket_code(),
                     status=TicketStatus.VALID,
                     valid_date=day,
+                    ticket_type_id=tt.id if tt else None,
                 )
                 db.add(t)
                 minted.append(t)
@@ -208,6 +217,7 @@ def issue_comp_tickets(db: Session, guest: Guest) -> list[Ticket]:
         for t in existing:
             by_day[t.valid_date] = by_day.get(t.valid_date, 0) + 1
         for day in days:
+            tt = _ticket_type_for(day)
             for _ in range(max(0, party - by_day.get(day, 0))):
                 t = Ticket(
                     guest_id=guest.id,
@@ -215,10 +225,13 @@ def issue_comp_tickets(db: Session, guest: Guest) -> list[Ticket]:
                     code=generate_ticket_code(),
                     status=TicketStatus.VALID,
                     valid_date=day,
+                    ticket_type_id=tt.id if tt else None,
                 )
                 db.add(t)
                 minted.append(t)
     else:
+        day = guest.visit_date or None
+        tt = _ticket_type_for(day)
         shortfall = max(0, party - len(existing))
         for _ in range(shortfall):
             t = Ticket(
@@ -228,7 +241,8 @@ def issue_comp_tickets(db: Session, guest: Guest) -> list[Ticket]:
                 status=TicketStatus.VALID,
                 # A day-specific guest's codes admit that day only;
                 # legacy/undated comps admit any day.
-                valid_date=guest.visit_date or None,
+                valid_date=day,
+                ticket_type_id=tt.id if tt else None,
             )
             db.add(t)
             minted.append(t)
@@ -348,6 +362,8 @@ def send_comp_ticket_email(db: Session, guest: Guest, tickets: list[Ticket], not
 
     # Assigned seats (hand-placed guests): show the seat next to its code.
     from app.models.seat import Seat
+    from app.models.ticket_type import TicketType
+    from app.services import seating
 
     seat_ids = [t.seat_id for t in tickets if t.seat_id]
     seat_by_id = (
@@ -360,6 +376,15 @@ def send_comp_ticket_email(db: Session, guest: Guest, tickets: list[Ticket], not
     # mislabels a section-placed comp ticket as "General admission / see
     # usher" even though the guest was placed in a specific section.
     section_fallback = f"Section {guest.section_label}" if guest.section_label else None
+    # The ticket's actual TYPE NAME ("Champagne Lounge", "Row 3
+    # Preferred Seating") — comps never carried this before 2026-09, so
+    # a GA/table type or an unassigned area showed nothing identifying
+    # once there was no specific seat. Combined with the seat/section
+    # above via format_ticket_label.
+    type_ids = {t.ticket_type_id for t in tickets if t.ticket_type_id}
+    type_name_by_id = (
+        {tt.id: tt.name for tt in db.query(TicketType).filter(TicketType.id.in_(type_ids)).all()} if type_ids else {}
+    )
 
     plural = "s" if len(tickets) > 1 else ""
     when = f"\nDate: {guest.visit_date}" if guest.visit_date else ""
@@ -383,7 +408,14 @@ def send_comp_ticket_email(db: Session, guest: Guest, tickets: list[Ticket], not
     )
 
     ticket_dicts = [
-        {"code": t.code, "valid_date": t.valid_date, "seat_label": seat_for(t) or section_fallback, "holder_name": guest.name}
+        {
+            "code": t.code,
+            "valid_date": t.valid_date,
+            "seat_label": seating.format_ticket_label(
+                type_name_by_id.get(t.ticket_type_id), seat_for(t) or section_fallback
+            ),
+            "holder_name": guest.name,
+        }
         for t in tickets
     ]
 

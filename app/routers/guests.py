@@ -826,6 +826,7 @@ def guest_door_roster(
     """
     from app.models.seat import Seat
     from app.models.ticket import Ticket
+    from app.models.ticket_type import TicketType
 
     guests = (
         db.query(Guest)
@@ -838,13 +839,14 @@ def guest_door_roster(
     codes_by_guest: dict = {}
     if ids:
         rows = (
-            db.query(Ticket, Seat)
+            db.query(Ticket, Seat, TicketType)
             .outerjoin(Seat, Seat.id == Ticket.seat_id)
+            .outerjoin(TicketType, TicketType.id == Ticket.ticket_type_id)
             .filter(Ticket.guest_id.in_(ids))
             .order_by(Ticket.valid_date, Ticket.created_at)
             .all()
         )
-        for ticket, seat in rows:
+        for ticket, seat, ticket_type in rows:
             # Section-placed (not seat-specific) guests have no seat_id —
             # their section lives on the Guest row instead. Without this
             # fallback the door roster and Guest list's QR panel both
@@ -853,13 +855,19 @@ def guest_door_roster(
             # specific (same gap fixed in comp_tickets.send_comp_ticket_email).
             guest = guests_by_id.get(ticket.guest_id)
             section_fallback = f"Section {guest.section_label}" if guest and guest.section_label else None
+            # The ticket's actual TYPE NAME ("Champagne Lounge", "Row 3
+            # Preferred Seating") — comps never carried this before
+            # 2026-09, so a GA/table type or an unassigned area showed
+            # nothing identifying once there was no specific seat.
             codes_by_guest.setdefault(ticket.guest_id, []).append(
                 {
                     "code": ticket.code,
                     "valid_date": ticket.valid_date,
                     "status": ticket.status.value if hasattr(ticket.status, "value") else str(ticket.status),
                     "checked_in_at": ticket.checked_in_at.isoformat() if ticket.checked_in_at else None,
-                    "seat_label": (seat.label if seat else None) or section_fallback,
+                    "seat_label": seating.format_ticket_label(
+                        ticket_type.name if ticket_type else None, (seat.label if seat else None) or section_fallback
+                    ),
                 }
             )
     out = []

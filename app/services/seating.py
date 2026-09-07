@@ -132,6 +132,46 @@ def sibling_pool_ids_for_days(db: Session, base_category_id, days) -> list:
     return ids
 
 
+def ticket_type_for_area_day(db: Session, category_id, day):
+    """
+    The TicketType actually SELLING this exact (pool, day) combo — the
+    same identity a buyer picking that pool/day at checkout would get.
+    Comp tickets never carried this at all before 2026-09: a minted comp
+    ticket had no reference to a TicketType, so once there was no
+    specific seat to fall back to, an unassigned area or a GA/table type
+    like "Champagne Lounge" showed nothing identifying on the ticket.
+    None when category_id is falsy, or nothing sells that exact combo
+    (legacy data, or a pool with no selling type configured at all).
+    Shared by comp_tickets.issue_comp_tickets (new tickets) and
+    seats.restamp_guest_tickets (backfills it onto already-minted ones
+    so "Update & resend" fixes a stale ticket too, not just new sends).
+    """
+    if not category_id:
+        return None
+    from app.models.ticket_type import TicketType
+
+    q = db.query(TicketType).filter(TicketType.seating_category_id == category_id)
+    q = q.filter(TicketType.valid_date.is_(None)) if day is None else q.filter(TicketType.valid_date == day)
+    return q.first()
+
+
+def format_ticket_label(ticket_type_name, detail) -> str:
+    """
+    Combine a ticket's TYPE NAME with whatever seat/section detail is
+    known into one display string — "Champagne Lounge", "Row 3
+    Preferred Seating — Section B", or just "Row 3 Preferred Seating"
+    when no section was ever chosen. Comps never carried a type name at
+    all before 2026-09 — a GA/table type or an unassigned area used to
+    show nothing identifying once there was no specific seat to fall
+    back to. Returns None only when NEITHER piece is known at all
+    (true legacy gap) — callers fall back to "General admission" for
+    that case, same as before.
+    """
+    if ticket_type_name and detail:
+        return f"{ticket_type_name} — {detail}"
+    return ticket_type_name or detail or None
+
+
 POOL_DAY_SUFFIX = re.compile(r"\s*\((\d{2})/(\d{2})\)$")
 
 

@@ -29,6 +29,7 @@ from app.models.order import Order
 from app.models.order_item import OrderItem
 from app.models.seat import Seat
 from app.models.ticket import Ticket, TicketStatus
+from app.models.ticket_type import TicketType
 from app.services.deps import CurrentUser
 from app.services.permissions import require_checkin
 
@@ -79,11 +80,19 @@ def _describe(db: Session, ticket: Ticket) -> dict:
             # Section-placed comp with no specific seat: the door still
             # gets a destination.
             comp_seat_label = f"Section {guest.section_label}"
+        # The ticket's actual TYPE ("Champagne Lounge", "Row 3 Preferred
+        # Seating") — this used to show the GUEST TYPE's name instead
+        # ("Sponsor", "Press"), a different concept entirely, because
+        # comps never carried a real ticket_type_id before 2026-09.
+        # Falls back to the guest type's name only for a genuinely old
+        # ticket minted before this fix ran (or "Update & resend" to
+        # backfill it).
+        tt = db.query(TicketType).filter(TicketType.id == ticket.ticket_type_id).first() if ticket.ticket_type_id else None
         out.update(
             kind="comp",
             refund_word="cancelled",  # comps never carried money
             name=guest.name if guest else None,
-            ticket_type_name=(gt.name if gt else None),
+            ticket_type_name=(tt.name if tt else (gt.name if gt else None)),
             seat_label=comp_seat_label,
             party_note=(f"code {idx} of {len(siblings)} for this guest" if idx and len(siblings) > 1 else None),
         )

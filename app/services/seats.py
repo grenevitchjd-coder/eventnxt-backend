@@ -287,6 +287,27 @@ def restamp_guest_tickets(db: Session, guest) -> None:
             if target is not None:
                 target.seat_id = seat.id
 
+    # Backfill ticket_type_id on any ticket that doesn't have one yet —
+    # comps never carried this at all before 2026-09, so an already-
+    # minted ticket stays permanently unidentified (no seat AND no type
+    # name) unless something re-runs this. Called from sync/"Update &
+    # resend" as well as fresh minting, so fixing this is one click on
+    # an existing guest, not a delete-and-recreate.
+    if guest.seating_category_id:
+        from app.services import seating as seating_service
+
+        for t in tickets:
+            if t.ticket_type_id is not None:
+                continue
+            category_id = (
+                seating_service.pool_for_day(db, guest.seating_category_id, t.valid_date)
+                if t.valid_date
+                else guest.seating_category_id
+            )
+            tt = seating_service.ticket_type_for_area_day(db, category_id, t.valid_date)
+            if tt:
+                t.ticket_type_id = tt.id
+
 
 def assign_guest_seats(db: Session, *, guest, seat_ids: list[uuid.UUID]) -> list[Seat]:
     """
