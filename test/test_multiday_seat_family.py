@@ -116,6 +116,45 @@ def main():
     check("second guest's seat differs from the first guest's",
           labels2.get(D1) != labels1.get(D1), (labels1, labels2))
 
+    print("3) a guest relying on the TYPE's defaults (no explicit ticket_allotment) still gets both nights")
+    # This is the common case an earlier version of the fix missed: it
+    # read payload.ticket_allotment / GuestTicketAllotment directly,
+    # which is EMPTY for a guest who never explicitly overrode their
+    # allotment — only seating.effective_allotment() sees the type's
+    # inherited defaults. Give the type an "all days" default instead
+    # of sending ticket_allotment on the guest at all.
+    gt_defaults = client.post(
+        f"/events/{EV}/guest-types",
+        json={"name": "Ghost Defaults", "guest_mode": "invite", "day_scope": "all", "default_ticket_count": 1},
+        headers=H,
+    ).json()
+    client.post(f"/events/{EV}/guest-types/{gt_defaults['id']}/seating-priorities",
+                json={"seating_category_id": pool["id"], "section_label": "A"}, headers=H)
+    g3 = client.post(
+        f"/events/{EV}/guests",
+        json={
+            "name": "Ghost Default Guest", "email": "ghostdefault@x.com", "guest_type_id": gt_defaults["id"],
+            "allocation_status": "confirmed", "party_size": 1, "guest_mode": "invite",
+            # deliberately no ticket_allotment — inherits the type's default
+        },
+        headers=H,
+    ).json()
+    labels3 = seat_labels_by_day(g3["id"])
+    check("type-default guest: both nights minted", set(labels3.keys()) == {D1, D2}, labels3)
+    check("type-default guest: night one has a real seat",
+          labels3.get(D1) and "Seat" in labels3[D1], labels3.get(D1))
+    check("type-default guest: night two ALSO has a real seat (the gap this scenario pins)",
+          labels3.get(D2) and "Seat" in labels3[D2], labels3.get(D2))
+    check("type-default guest: same physical seat both nights",
+          labels3.get(D1) == labels3.get(D2), labels3)
+
+    print("4) /seat-days sees both nights for the type-default guest too (powers the picker's day tabs)")
+    r = client.get(f"/events/{EV}/guests/{g3['id']}/seat-days", headers=H)
+    check("seat-days 200", r.status_code == 200, r.text[:200])
+    seat_days = r.json()
+    check("seat-days returns BOTH nights, not a single fallback day",
+          {d["date"] for d in seat_days} == {D1, D2}, seat_days and [d["date"] for d in seat_days])
+
     print()
     if failures:
         print(f"FAILED: {len(failures)} — " + ", ".join(failures))

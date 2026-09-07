@@ -12,7 +12,6 @@ from app.models.guest_type import GuestType
 from app.models.promo_code import PromoCode, RewardType
 from app.models.reward_redemption import RewardRedemption
 from app.models.guest_ticket_request import GuestTicketRequest
-from app.models.guest_ticket_allotment import GuestTicketAllotment
 from app.models.seating_category import SeatingCategory
 from app.schemas.rsvp import (
     PayoutTermsAcceptRequest,
@@ -428,12 +427,16 @@ def respond_to_rsvp(token: str, payload: RSVPRespondRequest, db: Session = Depen
             # to a bare section).
             _cat = db.query(SeatingCategory).filter(SeatingCategory.id == new_category_id).first()
             if _cat and _cat.sales_grain == "seat":
-                days = [
-                    d
-                    for (d,) in db.query(GuestTicketAllotment.date)
-                    .filter(GuestTicketAllotment.guest_id == guest.id, GuestTicketAllotment.quantity > 0)
-                    .all()
-                ] or ([guest.visit_date] if guest.visit_date else [])
+                # effective_allotment is the REAL source of a guest's
+                # per-day quantities (own override rows only if set,
+                # otherwise the guest type's defaults) — querying
+                # GuestTicketAllotment directly missed every guest
+                # relying on type defaults, since they carry no override
+                # rows at all (found live 2026-09, same gap as guests.py
+                # create_guest and the seat-days endpoint).
+                days = [d for d, q in seating.effective_allotment(db, guest).items() if q > 0] or (
+                    [guest.visit_date] if guest.visit_date else []
+                )
                 pool_ids = seating.sibling_pool_ids_for_days(db, new_category_id, days)
                 picked = seats_service.pick_available_seat_family(db, pool_ids, new_section_label, guest.party_size)
                 if picked:

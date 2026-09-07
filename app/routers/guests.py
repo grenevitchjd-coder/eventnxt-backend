@@ -217,10 +217,16 @@ def create_guest(
     ):
         _cat = db.query(SeatingCategory).filter(SeatingCategory.id == effective_seating_category_id).first()
         if _cat and _cat.sales_grain == "seat":
-            days = (
-                [item.date for item in payload.ticket_allotment if item.quantity > 0]
-                if payload.ticket_allotment
-                else ([payload.visit_date] if payload.visit_date else [])
+            # effective_allotment is the REAL source of a guest's per-day
+            # quantities — their own override rows only if explicitly
+            # set, otherwise the guest type's defaults. Reading
+            # payload.ticket_allotment directly (as this used to) misses
+            # every guest relying on type defaults, since they carry no
+            # override rows at all — exactly the "only night one gets a
+            # real seat" gap found live 2026-09 for a guest who never
+            # customized their allotment.
+            days = [d for d, q in seating.effective_allotment(db, guest).items() if q > 0] or (
+                [payload.visit_date] if payload.visit_date else []
             )
             pool_ids = seating.sibling_pool_ids_for_days(db, effective_seating_category_id, days)
             picked = seats_service.pick_available_seat_family(
@@ -412,12 +418,18 @@ def guest_seat_days(
             status_code=400,
             detail=f"{guest.name} isn't assigned to a seating area yet — set their area first, then pick seats.",
         )
-    days = [
-        d
-        for (d,) in db.query(GuestTicketAllotment.date)
-        .filter(GuestTicketAllotment.guest_id == guest_id, GuestTicketAllotment.quantity > 0)
-        .all()
-    ] or ([guest.visit_date] if guest.visit_date else [None])
+    # The REAL source of a guest's per-day quantities — their own
+    # override rows only if ticket_allotment_overridden, otherwise the
+    # guest type's defaults (or shape-derived grants). Querying
+    # GuestTicketAllotment directly here (an earlier version of this
+    # endpoint did) is wrong for the common case: a guest who never
+    # explicitly customized their allotment has NO rows there at all,
+    # even though they hold real tickets for every one of the type's
+    # default days — this silently fell back to a single day and hid
+    # the day tabs entirely (found live 2026-09).
+    days = [d for d, q in seating.effective_allotment(db, guest).items() if q > 0] or (
+        [guest.visit_date] if guest.visit_date else [None]
+    )
 
     out: list[GuestSeatDayResponse] = []
     seen_days = set()
