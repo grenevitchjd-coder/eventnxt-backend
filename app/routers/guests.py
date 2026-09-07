@@ -489,6 +489,7 @@ def guest_seat_days(
                 date=d,
                 category_id=category.id,
                 category_name=category.name,
+                unit_label=category.unit_label,
                 seats=seats_service.admin_seat_statuses(db, category),
             )
         )
@@ -875,11 +876,12 @@ def guest_door_roster(
             # admission" even though the guest was placed somewhere
             # specific (same gap fixed in comp_tickets.send_comp_ticket_email).
             guest = guests_by_id.get(ticket.guest_id)
-            section_fallback = f"Section {guest.section_label}" if guest and guest.section_label else None
             # The ticket's actual TYPE NAME ("Champagne Lounge", "Row 3
             # Preferred Seating") — comps never carried this before
             # 2026-09, so a GA/table type or an unassigned area showed
             # nothing identifying once there was no specific seat.
+            # Structural detail (row/section/seat/table, honoring the
+            # pool's own unit_label vocabulary) always wins when known.
             codes_by_guest.setdefault(ticket.guest_id, []).append(
                 {
                     "code": ticket.code,
@@ -887,7 +889,8 @@ def guest_door_roster(
                     "status": ticket.status.value if hasattr(ticket.status, "value") else str(ticket.status),
                     "checked_in_at": ticket.checked_in_at.isoformat() if ticket.checked_in_at else None,
                     "seat_label": seating.format_ticket_label(
-                        ticket_type.name if ticket_type else None, (seat.label if seat else None) or section_fallback
+                        ticket_type.name if ticket_type else None,
+                        seating.format_guest_ticket_detail(db, guest, seat=seat) if guest else None,
                     ),
                 }
             )

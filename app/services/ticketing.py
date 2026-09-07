@@ -325,6 +325,7 @@ def ticket_catalog(db: Session, event_id) -> list:
             valid_date=t.valid_date,
             assigned_seating=(t.seating_category_id in assigned_pool_ids) or (t.id in seat_pass_ids),
             section_required=t.seating_category_id in section_pool_ids,
+            unit_label=(pools_by_id.get(t.seating_category_id).unit_label if pools_by_id.get(t.seating_category_id) else None),
             sections=sections_by_pool.get(t.seating_category_id, []),
             pass_nights=pass_nights_by_id.get(t.id, []),
             available=avail[t.id]["available"],
@@ -375,6 +376,7 @@ def seat_map_for_type(db: Session, event_id, ticket_type_id):
             grouped.setdefault((s.section_label, s.row_label), []).append(s)
         return PublicSeatMapResponse(
             ticket_type_id=tt.id,
+            unit_label=(db.query(SeatingCategory.unit_label).filter(SeatingCategory.id == pool_ids[0]).scalar()),
             sections=[
                 PublicSeatSectionResponse(
                     section_label=sec,
@@ -408,6 +410,7 @@ def seat_map_for_type(db: Session, event_id, ticket_type_id):
         grouped.setdefault((seat.section_label, seat.row_label), []).append(seat)
     return PublicSeatMapResponse(
         ticket_type_id=tt.id,
+        unit_label=(db.query(SeatingCategory.unit_label).filter(SeatingCategory.id == tt.seating_category_id).scalar()),
         sections=[
             PublicSeatSectionResponse(
                 section_label=sec,
@@ -740,16 +743,18 @@ def send_order_confirmation_email(
     )
 
     try:
+        from app.services import seating
+
         seat_ids = [t.seat_id for t in tickets if t.seat_id]
-        seat_by_id = (
-            {s.id: s.label for s in db.query(Seat).filter(Seat.id.in_(seat_ids)).all()} if seat_ids else {}
-        )
+        seats_by_id = {s.id: s for s in db.query(Seat).filter(Seat.id.in_(seat_ids)).all()} if seat_ids else {}
         # Section-sold (unassigned) tickets have no seat_id at all — the
         # section the buyer picked lives on the ORDER ITEM instead
-        # (order_item.section_label, e.g. "Section A · Row 1"). Without
-        # this fallback the PDF silently mislabels a specific-section
-        # ticket as "General admission / see usher" — exactly the gap
-        # that made a door-sold section ticket unidentifiable.
+        # (order_item.section_label — a snapshot ALREADY formatted with
+        # the pool's unit_label vocabulary at purchase time, see
+        # seats.lock_and_claim_section). Without this fallback the PDF
+        # silently mislabels a specific-section ticket as "General
+        # admission / see usher" — exactly the gap that made a
+        # door-sold section ticket unidentifiable.
         item_ids = {t.order_item_id for t in tickets if t.order_item_id}
         section_by_item = (
             {
@@ -763,7 +768,7 @@ def send_order_confirmation_email(
             {
                 "code": t.code,
                 "valid_date": t.valid_date,
-                "seat_label": seat_by_id.get(t.seat_id) or section_by_item.get(t.order_item_id),
+                "seat_label": seating.format_seat_label(db, seats_by_id.get(t.seat_id)) or section_by_item.get(t.order_item_id),
                 "holder_name": order.buyer_name,
             }
             for t in tickets

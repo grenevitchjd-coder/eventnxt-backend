@@ -43,6 +43,7 @@ from app.schemas.ticketing import (
     PublicSeatMapResponse,
 )
 from app.services import ticketing
+from app.services import seating
 from app.services.native_sales import record_native_sales
 from app.services.stripe_gateway import WebhookNotConfigured, construct_webhook_event, create_checkout_session
 
@@ -396,8 +397,8 @@ def get_public_order(order_token: str, db: Session = Depends(get_db)):
     items = db.query(OrderItem).filter(OrderItem.order_id == order.id).all()
     tickets = db.query(Ticket).filter(Ticket.order_id == order.id).all()
     seat_ids = [t.seat_id for t in tickets if t.seat_id]
-    seat_labels = (
-        {x.id: x.label for x in db.query(Seat).filter(Seat.id.in_(seat_ids)).all()} if seat_ids else {}
+    seats_by_id = (
+        {x.id: x for x in db.query(Seat).filter(Seat.id.in_(seat_ids)).all()} if seat_ids else {}
     )
 
     return PublicOrderResponse(
@@ -421,7 +422,7 @@ def get_public_order(order_token: str, db: Session = Depends(get_db)):
                 code=t.code,
                 ticket_type_name=_ticket_type_name(items, t),
                 status=t.status.value,
-                seat_label=seat_labels.get(t.seat_id) or _section_label_for(items, t),
+                seat_label=seating.format_seat_label(db, seats_by_id.get(t.seat_id)) or _section_label_for(items, t),
                 valid_date=t.valid_date,
             )
             for t in tickets

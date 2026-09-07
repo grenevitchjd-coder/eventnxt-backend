@@ -107,6 +107,7 @@ class GuestSeatDayResponse(BaseModel):
     date: Optional[str] = None
     category_id: uuid.UUID
     category_name: str
+    unit_label: Optional[str] = None  # the pool's own word for "Seat" (e.g. "Table") — None keeps the default
     seats: List[AdminSeatResponse] = []
 
 

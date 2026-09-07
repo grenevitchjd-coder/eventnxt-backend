@@ -42,7 +42,7 @@ from app.schemas.ticketing import (
     PublicSeatMapResponse,
     PublicTicketTypeResponse,
 )
-from app.services import ticketing
+from app.services import seating, ticketing
 from app.services.deps import CurrentUser
 from app.services.native_sales import record_native_sales
 from app.services.permissions import require_guest_list
@@ -170,11 +170,13 @@ def sell_at_door(
     email_sent = ticketing.send_order_confirmation_email(db, order, tickets, event_title, order_url)
 
     seat_ids = [t.seat_id for t in tickets if t.seat_id]
-    seat_by_id = {s.id: s.label for s in db.query(Seat).filter(Seat.id.in_(seat_ids)).all()} if seat_ids else {}
+    seats_by_id = {s.id: s for s in db.query(Seat).filter(Seat.id.in_(seat_ids)).all()} if seat_ids else {}
     # Section-sold (unassigned) tickets carry no seat_id — the section
-    # the staffer picked lives on the order item instead (same fallback
-    # get_public_order already uses; missing it here is exactly what
-    # made a door-sold section ticket unidentifiable on screen).
+    # the staffer picked lives on the order item instead (a snapshot
+    # ALREADY formatted with the pool's unit_label vocabulary at
+    # purchase time, see seats.lock_and_claim_section). Missing this
+    # fallback here is exactly what made a door-sold section ticket
+    # unidentifiable on screen.
     item_ids = {t.order_item_id for t in tickets if t.order_item_id}
     section_by_item = (
         {i.id: i.section_label for i in db.query(OrderItem).filter(OrderItem.id.in_(item_ids)).all()}
@@ -192,7 +194,7 @@ def sell_at_door(
             DoorSaleTicketResponse(
                 code=t.code,
                 ticket_type_name=tts_by_id[t.ticket_type_id].name if t.ticket_type_id in tts_by_id else "Ticket",
-                seat_label=seat_by_id.get(t.seat_id) or section_by_item.get(t.order_item_id),
+                seat_label=seating.format_seat_label(db, seats_by_id.get(t.seat_id)) or section_by_item.get(t.order_item_id),
                 valid_date=t.valid_date,
             )
             for t in tickets

@@ -277,6 +277,7 @@ def fan_out_ticket_type(
                 section_label=template_pool.section_label,
                 table_count=template_pool.table_count,
                 seats_per_table=template_pool.seats_per_table,
+                unit_label=template_pool.unit_label,
             )
             db.add(pool)
             db.flush()

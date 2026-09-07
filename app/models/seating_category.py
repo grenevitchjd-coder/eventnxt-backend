@@ -42,4 +42,11 @@ class SeatingCategory(Base):
     # the router, so `capacity` stays the one number all machinery reads.
     table_count = Column(Integer, nullable=True)
     seats_per_table = Column(Integer, nullable=True)
+    # One customizable word for this pool's structural unit — "Table",
+    # "Room", "Area", "Row" — read by seating.format_unit_label()
+    # everywhere a seat/section/table needs to show on a ticket, buyer
+    # picker, or comp assignment UI instead of the hardcoded "Section"/
+    # "Seat" wording every display used to invent independently
+    # (2026-09). NULL keeps that default wording exactly as before.
+    unit_label = Column(String, nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())

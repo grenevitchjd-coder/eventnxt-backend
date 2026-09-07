@@ -124,6 +124,8 @@ def admin_seat_statuses(db: Session, category: SeatingCategory) -> list[dict]:
     AdminSeatResponse). One taken_seat_ids pass plus one sold query —
     no per-seat queries.
     """
+    from app.services import seating as seating_service
+
     seats = (
         db.query(Seat)
         .filter(Seat.seating_category_id == category.id)
@@ -177,7 +179,9 @@ def admin_seat_statuses(db: Session, category: SeatingCategory) -> list[dict]:
                 "section_label": s.section_label,
                 "row_label": s.row_label,
                 "seat_number": s.seat_number,
-                "label": s.label,
+                "label": seating_service.format_unit_label(
+                    category, section_label=s.section_label, row_label=s.row_label, seat_number=s.seat_number
+                ),
                 "status": status,
                 "block_label": s.block_label,
                 "guest_id": s.guest_id,
@@ -797,8 +801,8 @@ def lock_and_claim_section(db: Session, *, ticket_type, quantity: int, zone_sect
             "Pick another section or adjust the quantity."
         )
     order_item.zone_section_id = section.id
-    order_item.section_label = (
-        f"Section {section.section_label}" + (f" · {section.row_label}" if section.row_label else "")
+    order_item.section_label = seating_service.format_unit_label(
+        _cat, section_label=section.section_label, row_label=section.row_label
     )
 
 def lock_and_claim_pass_sections(
@@ -851,7 +855,8 @@ def lock_and_claim_pass_sections(
             )
         db.add(OrderItemPassSection(order_item_id=order_item.id, zone_section_id=section.id))
         day = day_by_pool.get(section.seating_category_id)
-        labels.append((f"{day} — " if day else "") + f"Section {section.section_label}")
+        unit_text = seating_service.format_unit_label(cat, section_label=section.section_label, row_label=section.row_label)
+        labels.append((f"{day} — " if day else "") + unit_text)
     # One snapshot the order page and emails can show as-is.
     order_item.section_label = " · ".join(labels)
     db.flush()

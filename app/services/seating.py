@@ -157,19 +157,114 @@ def ticket_type_for_area_day(db: Session, category_id, day):
 
 def format_ticket_label(ticket_type_name, detail) -> str:
     """
-    Combine a ticket's TYPE NAME with whatever seat/section detail is
-    known into one display string — "Champagne Lounge", "Row 3
-    Preferred Seating — Section B", or just "Row 3 Preferred Seating"
-    when no section was ever chosen. Comps never carried a type name at
-    all before 2026-09 — a GA/table type or an unassigned area used to
-    show nothing identifying once there was no specific seat to fall
-    back to. Returns None only when NEITHER piece is known at all
-    (true legacy gap) — callers fall back to "General admission" for
-    that case, same as before.
+    A ticket's structural detail (row/section/seat/table) always wins
+    when it exists — "Row 3 · Section B" needs nothing else, and a
+    promotional type name prepended to it just adds noise (an
+    organizer's own correction, 2026-09: the type name is a sales
+    label that can say anything, not the navigational fact a person
+    actually needs). The ticket TYPE NAME is only a fallback for a pure
+    named-area type with no section/seat/table to show at all — e.g.
+    "Champagne Lounge" alone. Returns None only when NEITHER piece is
+    known (true legacy gap) — callers fall back to "General admission".
     """
-    if ticket_type_name and detail:
-        return f"{ticket_type_name} — {detail}"
-    return ticket_type_name or detail or None
+    return detail or ticket_type_name or None
+
+
+def format_unit_label(category, section_label=None, row_label=None, seat_number=None) -> str:
+    """
+    One rendering for a pool's structural identity, reading the pool's
+    own unit_label (organizer-set: "Table", "Room", "Area", "Row"; None
+    keeps the default wording below) — used everywhere a seat, section,
+    or table needs to show on a ticket, buyer picker, or comp
+    assignment UI instead of each of ~6 call sites hardcoding its own
+    word (exactly how "Row 3" silently vanished from a row-grain ticket
+    before this fix: each site invented its own format independently).
+
+    For an individually-numbered pool (sales_grain == "seat" — this
+    covers "assigned seats" AND "whole table" alike, since a table
+    bought/assigned as one exclusive unit is mechanically identical to
+    an assigned seat, just named differently): the pool's own word
+    replaces "Seat" — "Table 4" — with any section grouping shown
+    ahead of it unchanged ("Section VIP · Table 4"), since that's a
+    coarser context around the individually-numbered unit, not the
+    unit's own name.
+
+    For a sectioned-but-unassigned pool (sales_grain in "row"/"table"/
+    "ga" with sections — covers "rows", "individual seats at a shared
+    table", and "room spaces" alike, since none of these have a
+    numbered per-person unit): the pool's own word replaces "Section"
+    — "Table 4", "Room B" — with the pool's row_label (if any)
+    prepended as-is, since that's already a full name an organizer
+    typed ("Row 3"), not a word needing translation.
+
+    Returns None when nothing is known at all.
+    """
+    unit_word = category.unit_label if category and category.unit_label else None
+    if seat_number is not None:
+        bits = []
+        if section_label:
+            bits.append(f"Section {section_label}")
+        if row_label:
+            bits.append(row_label)
+        bits.append(f"{unit_word or 'Seat'} {seat_number}")
+        return " · ".join(bits)
+    if section_label:
+        bits = []
+        if row_label:
+            bits.append(row_label)
+        bits.append(f"{unit_word or 'Section'} {section_label}")
+        return " · ".join(bits)
+    return row_label or None
+
+
+def format_seat_label(db: Session, seat) -> str:
+    """
+    format_unit_label for a single Seat row directly, reading its own
+    pool's unit_label vocabulary — for anything working from a bare
+    seat with no guest involved (paid orders, door sales). None when
+    seat is None.
+    """
+    from app.models.seating_category import SeatingCategory
+
+    if seat is None:
+        return None
+    category = db.query(SeatingCategory).filter(SeatingCategory.id == seat.seating_category_id).first()
+    return format_unit_label(
+        category, section_label=seat.section_label, row_label=seat.row_label, seat_number=seat.seat_number
+    )
+
+
+def format_guest_ticket_detail(db: Session, guest, seat=None) -> str:
+    """
+    The seat/section/table DETAIL for a comp guest's ticket, reading the
+    pool's own unit_label vocabulary (format_unit_label). Prefers an
+    actual assigned SEAT when there is one — a seat's own pool may
+    differ from the guest's "home" category for a multi-night guest,
+    since each night's seat lives in its own pool clone. Falls back to
+    the guest's bare section_label when there's no specific seat,
+    looking up the matching ZoneSection's own row_label (which can
+    differ from the pool's general row_label field) rather than
+    assuming one. None when neither is known — callers fall back to the
+    ticket type name, or "General admission" if that's unknown too.
+    """
+    from app.models.zone_section import ZoneSection
+
+    if seat is not None:
+        return format_seat_label(db, seat)
+    if guest.section_label and guest.seating_category_id:
+        from app.models.seating_category import SeatingCategory
+
+        category = db.query(SeatingCategory).filter(SeatingCategory.id == guest.seating_category_id).first()
+        row_label = (
+            db.query(ZoneSection.row_label)
+            .filter(
+                ZoneSection.seating_category_id == guest.seating_category_id,
+                ZoneSection.section_label == guest.section_label,
+            )
+            .scalar()
+        )
+        return format_unit_label(category, section_label=guest.section_label, row_label=row_label)
+    return None
 
 
 POOL_DAY_SUFFIX = re.compile(r"\s*\((\d{2})/(\d{2})\)$")

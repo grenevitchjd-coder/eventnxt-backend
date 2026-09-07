@@ -73,6 +73,12 @@ class PublicTicketTypeResponse(BaseModel):
     assigned_seating: bool = False
     # True when the buyer must choose a section (sectioned, unassigned).
     section_required: bool = False
+    # The pool's own word for its structural unit ("Table", "Room",
+    # "Area", "Row") — None keeps the picker's default "Section"/"Seat"
+    # wording. Read once here and reused for both the section dropdown
+    # and the seat picker below, so a Champagne Lounge picker can say
+    # "Table" instead of a hardcoded "Section" (2026-09).
+    unit_label: Optional[str] = None
     # The choosable sections for section_required types, with live
     # remaining heads so the picker can show "Section C · 12 left".
     sections: list["PublicTicketSectionOption"] = []
@@ -240,6 +246,7 @@ class PublicSeatSectionResponse(BaseModel):
 
 class PublicSeatMapResponse(BaseModel):
     ticket_type_id: uuid.UUID
+    unit_label: Optional[str] = None  # the pool's own word for "Seat" (e.g. "Table") — None keeps the default
     sections: list[PublicSeatSectionResponse] = []
 
 

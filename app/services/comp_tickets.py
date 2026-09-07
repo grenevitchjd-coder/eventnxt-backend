@@ -366,21 +366,14 @@ def send_comp_ticket_email(db: Session, guest: Guest, tickets: list[Ticket], not
     from app.services import seating
 
     seat_ids = [t.seat_id for t in tickets if t.seat_id]
-    seat_by_id = (
-        {s.id: s.label for s in db.query(Seat).filter(Seat.id.in_(seat_ids)).all()} if seat_ids else {}
-    )
-    seat_for = lambda t: seat_by_id.get(t.seat_id)  # noqa: E731
-    # Section-placed (not seat-specific) guests have no seat_id on any of
-    # their tickets — their section lives on the Guest row instead. Same
-    # gap as the native-purchase path: without this fallback the PDF
-    # mislabels a section-placed comp ticket as "General admission / see
-    # usher" even though the guest was placed in a specific section.
-    section_fallback = f"Section {guest.section_label}" if guest.section_label else None
+    seat_by_id = {s.id: s for s in db.query(Seat).filter(Seat.id.in_(seat_ids)).all()} if seat_ids else {}
     # The ticket's actual TYPE NAME ("Champagne Lounge", "Row 3
     # Preferred Seating") — comps never carried this before 2026-09, so
     # a GA/table type or an unassigned area showed nothing identifying
-    # once there was no specific seat. Combined with the seat/section
-    # above via format_ticket_label.
+    # at all once there was no specific seat. Structural detail (row/
+    # section/seat/table, via format_guest_ticket_detail below) always
+    # wins over this when it's known — the type name is only a fallback
+    # for a pure named-area type with nothing more specific to show.
     type_ids = {t.ticket_type_id for t in tickets if t.ticket_type_id}
     type_name_by_id = (
         {tt.id: tt.name for tt in db.query(TicketType).filter(TicketType.id.in_(type_ids)).all()} if type_ids else {}
@@ -412,7 +405,8 @@ def send_comp_ticket_email(db: Session, guest: Guest, tickets: list[Ticket], not
             "code": t.code,
             "valid_date": t.valid_date,
             "seat_label": seating.format_ticket_label(
-                type_name_by_id.get(t.ticket_type_id), seat_for(t) or section_fallback
+                type_name_by_id.get(t.ticket_type_id),
+                seating.format_guest_ticket_detail(db, guest, seat=seat_by_id.get(t.seat_id)),
             ),
             "holder_name": guest.name,
         }

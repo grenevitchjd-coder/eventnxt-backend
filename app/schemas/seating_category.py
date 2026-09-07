@@ -56,6 +56,7 @@ class _ZoneFieldsMixin(BaseModel):
     section_label: Optional[str] = None
     table_count: Optional[int] = None
     seats_per_table: Optional[int] = None
+    unit_label: Optional[str] = None
 
     @field_validator("capacity")
     @classmethod
@@ -81,6 +82,7 @@ class _ZoneFieldsMixin(BaseModel):
         else:
             self.table_count = None
             self.seats_per_table = None
+        self.unit_label = (self.unit_label or "").strip() or None
         return self
 
 
@@ -102,6 +104,7 @@ class SeatingCategoryResponse(BaseModel):
     section_label: Optional[str] = None
     table_count: Optional[int] = None
     seats_per_table: Optional[int] = None
+    unit_label: Optional[str] = None
     sections: list[ZoneSectionResponse] = []
     created_at: datetime
 

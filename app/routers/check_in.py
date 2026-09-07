@@ -72,14 +72,10 @@ def _describe(db: Session, ticket: Ticket) -> dict:
             .all()
         )
         idx = next((i + 1 for i, t in enumerate(siblings) if t.id == ticket.id), None)
-        comp_seat_label = None
-        if ticket.seat_id:
-            seat = db.query(Seat).filter(Seat.id == ticket.seat_id).first()
-            comp_seat_label = seat.label if seat else None
-        if not comp_seat_label and guest and guest.section_label:
-            # Section-placed comp with no specific seat: the door still
-            # gets a destination.
-            comp_seat_label = f"Section {guest.section_label}"
+        seat = db.query(Seat).filter(Seat.id == ticket.seat_id).first() if ticket.seat_id else None
+        from app.services import seating
+
+        comp_seat_label = seating.format_guest_ticket_detail(db, guest, seat=seat) if guest else None
         # The ticket's actual TYPE ("Champagne Lounge", "Row 3 Preferred
         # Seating") — this used to show the GUEST TYPE's name instead
         # ("Sponsor", "Press"), a different concept entirely, because

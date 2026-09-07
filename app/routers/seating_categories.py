@@ -48,6 +48,7 @@ def create_seating_category(
         section_label=(payload.section_label or None),
         table_count=payload.table_count,
         seats_per_table=payload.seats_per_table,
+        unit_label=payload.unit_label,
     )
     db.add(category)
     db.flush()
@@ -124,6 +125,7 @@ def update_seating_category(
     category.section_label = payload.section_label or None
     category.table_count = payload.table_count
     category.seats_per_table = payload.seats_per_table
+    category.unit_label = payload.unit_label
     db.flush()
     # Switching a pool to (or within) assigned seating regenerates its
     # seats from the existing section rows.
@@ -286,6 +288,7 @@ def fan_out_seating_category(
             section_label=category.section_label,
             table_count=category.table_count,
             seats_per_table=category.seats_per_table,
+            unit_label=category.unit_label,
         )
         db.add(clone)
         db.flush()
