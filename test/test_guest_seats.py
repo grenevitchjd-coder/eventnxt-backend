@@ -192,14 +192,15 @@ def main():
     nums, n_tickets = db_ticket_seats(guest["id"])
     check("tickets re-stamped to exactly 4,6", n_tickets == 2 and nums == {4, 6}, f"{n_tickets} {nums}")
 
-    # ---- 6. RSVP no releases assignment, keeps reservations ----
+    # ---- 6. RSVP no releases assignment AND the reservation (2026-09:
+    #         a decline gives up the seat for good, same as a delete) ----
     r = client.post(f"/public/rsvp/{guest['rsvp_token']}/respond", json={"attending": False})
     check("rsvp no ok", r.status_code == 200, r.text)
     view = client.get(f"/events/{EV}/seating-categories/{pool['id']}/seats", headers=H).json()
     vb = {s["seat_number"]: s for s in view}
     check(
-        "decline: 4,6 unassigned but still reserved",
-        all(vb[n]["guest_name"] is None and vb[n]["status"] == "reserved" for n in (4, 6)),
+        "decline: 4,6 unassigned AND back to available — not left reserved under a guest who isn't coming",
+        all(vb[n]["guest_name"] is None and vb[n]["status"] == "available" for n in (4, 6)),
         vb,
     )
     nums, _ = db_ticket_seats(guest["id"])

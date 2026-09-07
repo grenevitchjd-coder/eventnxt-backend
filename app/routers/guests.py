@@ -19,6 +19,7 @@ from app.schemas.guest import (
     GuestCreateRequest,
     GuestUpdateRequest,
     GuestResponse,
+    GuestSeatDayResponse,
     GuestSeatsAssignRequest,
     GuestSentStatusRequest,
     TicketAllotmentDayItem,
@@ -358,7 +359,7 @@ def set_guest_seats(
     guest_id: str,
     payload: GuestSeatsAssignRequest,
     db: Session = Depends(get_db),
-    user: CurrentUser = Depends(require_guests),
+    user: CurrentUser = Depends(require_guests_or_guest_list),
 ):
     """
     Wholesale-replace this guest's assigned seats (Slice B of reserved
@@ -367,6 +368,8 @@ def set_guest_seats(
     The guest's existing comp ticket codes are re-stamped so the door
     scan and any re-sent email show the seat. Returns the updated guest
     plus the pool's full seat view so the UI repaints from one response.
+    Any-of guests/guest_list — Guest list's own "Seats" action edits
+    from here too, same as viewing/removing a guest does.
     """
     guest = db.query(Guest).filter(Guest.id == guest_id, Guest.event_id == event_id).first()
     if not guest:
@@ -381,6 +384,60 @@ def set_guest_seats(
         "guest": _serialize_guest(db, guest),
         "seats": seats_service.admin_seat_statuses(db, category) if category else [],
     }
+
+
+@router.get("/{guest_id}/seat-days", response_model=list[GuestSeatDayResponse])
+def guest_seat_days(
+    event_id: str,
+    guest_id: str,
+    db: Session = Depends(get_db),
+    user: CurrentUser = Depends(require_guests_or_guest_list),
+):
+    """
+    One seat map PER NIGHT for a guest whose ticket spans several days
+    — each night is a separate pool clone with its own Seat rows, so
+    the plain "Seats" picker (one pool, no day option) could only ever
+    show/move the guest's HOME night. This is what lets the picker
+    offer day tabs: view Friday's map and move just Friday's seat
+    without touching Thursday's, or move all nights together.
+    Single-day / whole-event guests (no per-day allotment, no
+    visit_date) get back one entry with date=None — the picker then
+    has nothing to switch between, same as before this endpoint existed.
+    """
+    guest = db.query(Guest).filter(Guest.id == guest_id, Guest.event_id == event_id).first()
+    if not guest:
+        raise HTTPException(status_code=404, detail="Guest not found.")
+    if not guest.seating_category_id:
+        raise HTTPException(
+            status_code=400,
+            detail=f"{guest.name} isn't assigned to a seating area yet — set their area first, then pick seats.",
+        )
+    days = [
+        d
+        for (d,) in db.query(GuestTicketAllotment.date)
+        .filter(GuestTicketAllotment.guest_id == guest_id, GuestTicketAllotment.quantity > 0)
+        .all()
+    ] or ([guest.visit_date] if guest.visit_date else [None])
+
+    out: list[GuestSeatDayResponse] = []
+    seen_days = set()
+    for d in days:
+        if d in seen_days:
+            continue
+        seen_days.add(d)
+        category_id = seating.pool_for_day(db, guest.seating_category_id, d) if d else guest.seating_category_id
+        category = db.query(SeatingCategory).filter(SeatingCategory.id == category_id).first()
+        if not category:
+            continue
+        out.append(
+            GuestSeatDayResponse(
+                date=d,
+                category_id=category.id,
+                category_name=category.name,
+                seats=seats_service.admin_seat_statuses(db, category),
+            )
+        )
+    return out
 
 
 @router.patch("/{guest_id}/sent-status", response_model=GuestResponse)
@@ -636,14 +693,15 @@ def delete_guest(
     """
     Fully remove a guest — including any comp codes already minted for
     them (the codes die with them; the door would show not-found), any
-    pending ticket requests, and their seat assignments. Assigned seats
-    stay RESERVED (blocked, label intact) so the physical hold survives
-    the person — release them from the type's Seats view if the chairs
-    should go back on sale. A distributor with recipients still on the
+    pending ticket requests, and their seat assignments. A seat they
+    held is released back to general availability automatically —
+    gone means gone; there's no reason a deleted guest's name should
+    keep a chair off-sale (2026-09: this used to require a manual trip
+    to Seats Setup for every deletion, and testing kept leaving orphaned
+    reserved holds behind). A distributor with recipients still on the
     books can't be deleted; remove or reassign the recipients first.
     """
     from app.models.guest_ticket_request import GuestTicketRequest
-    from app.models.seat import Seat
     from app.models.ticket import Ticket
 
     guest = db.query(Guest).filter(Guest.id == guest_id, Guest.event_id == event_id).first()
@@ -671,7 +729,7 @@ def delete_guest(
     # each bulk delete hitting the DB immediately.
     db.query(GuestTicketRequest).filter(GuestTicketRequest.guest_id == guest_id).delete()
     db.query(Ticket).filter(Ticket.guest_id == guest_id).delete()
-    db.query(Seat).filter(Seat.guest_id == guest_id).update({Seat.guest_id: None})
+    seats_service.release_seats_for_guest(db, guest_id)
     db.query(GuestTicketAllotment).filter(GuestTicketAllotment.guest_id == guest_id).delete()
     db.delete(guest)
     db.commit()
@@ -694,10 +752,11 @@ def remove_guest_with_notice(
     ticket-receiving guests of ANY status — and when the guest was
     confirmed with codes in hand, they're emailed a cancellation notice
     (optional organizer note included) so the removal is never silent.
-    Allotment holders aren't removable here; manage them on Allotments.
+    A seat they held releases back to general availability automatically
+    (see delete_guest). Allotment holders aren't removable here; manage
+    them on Allotments.
     """
     from app.models.guest_ticket_request import GuestTicketRequest
-    from app.models.seat import Seat
     from app.models.ticket import Ticket
 
     guest = db.query(Guest).filter(Guest.id == guest_id, Guest.event_id == event_id).first()
@@ -711,7 +770,7 @@ def remove_guest_with_notice(
         comp_tickets.send_cancellation_email(db, guest, ticket_count, note=payload.note)
     db.query(GuestTicketRequest).filter(GuestTicketRequest.guest_id == guest_id).delete()
     db.query(Ticket).filter(Ticket.guest_id == guest_id).delete()
-    db.query(Seat).filter(Seat.guest_id == guest_id).update({Seat.guest_id: None})
+    seats_service.release_seats_for_guest(db, guest_id)
     db.query(GuestTicketAllotment).filter(GuestTicketAllotment.guest_id == guest_id).delete()
     db.delete(guest)
     db.commit()

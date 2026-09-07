@@ -196,6 +196,24 @@ def guest_seats(db: Session, guest_id: uuid.UUID) -> list[Seat]:
     )
 
 
+def release_seats_for_guest(db: Session, guest_id, unblock: bool = True) -> None:
+    """
+    Detach any seats currently assigned to this guest (Seat.guest_id ->
+    None). unblock=True (the default, and now the ONLY behavior used
+    anywhere a guest gives up their tickets for good — deleted, or
+    declined via RSVP) also clears is_blocked/block_label, so the seat
+    goes back on general sale instead of sitting reserved forever
+    under a guest who no longer exists or isn't coming. Shared by
+    guests.delete_guest / remove_guest_with_notice and the public RSVP
+    decline path — one rule, not two slightly-different copies of it.
+    """
+    update = {Seat.guest_id: None}
+    if unblock:
+        update[Seat.is_blocked] = False
+        update[Seat.block_label] = None
+    db.query(Seat).filter(Seat.guest_id == guest_id).update(update)
+
+
 def restamp_guest_tickets(db: Session, guest) -> None:
     """
     Make the guest's VALID comp tickets mirror their assigned seats:

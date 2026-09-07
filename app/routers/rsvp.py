@@ -450,15 +450,14 @@ def respond_to_rsvp(token: str, payload: RSVPRespondRequest, db: Session = Depen
         guest.allocation_status = GuestAllocationStatus.DECLINED
         guest.rsvp_confirmed = "no"
         guest.needs_seating = False
-        # A declined guest releases their seat back to the pool.
+        # A declined guest gives up their seat for good — releases back
+        # to general availability automatically, same "gone means gone"
+        # rule as deleting a guest (2026-09).
         guest.seating_category_id = None
         guest.section_label = None
-        # ...and any hand-assigned seats release from the guest but STAY
-        # reserved, ready to hand to someone else.
         from app.services import seats as seats_service
 
-        for seat in seats_service.guest_seats(db, guest.id):
-            seat.guest_id = None
+        seats_service.release_seats_for_guest(db, guest.id)
         seats_service.restamp_guest_tickets(db, guest)
 
     db.commit()
