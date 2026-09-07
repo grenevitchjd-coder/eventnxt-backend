@@ -516,56 +516,71 @@ def _format_money(cents: int, currency: str) -> str:
     return f"{symbol}{cents / 100:.2f} {currency.upper()}" if not symbol else f"{symbol}{cents / 100:.2f}"
 
 
-def send_order_confirmation_email(order: Order, tickets: list[Ticket], event_title: str, order_url: str) -> bool:
+def send_order_confirmation_email(
+    db: Session, order: Order, tickets: list[Ticket], event_title: str, order_url: str
+) -> bool:
     """
     Best-effort by design: the paid order is sacred, the email is
     retryable (the buyer can always self-serve via Find My Tickets).
     Returns True if sent; never raises.
+
+    Delivery matches the comp/guest ticket email exactly (see
+    comp_tickets.send_comp_ticket_email): a summary in the body, no
+    codes or QR images there, day-split PDF attachments hold the real
+    admission codes/QR. The one deliberate difference is the "thank you
+    for your patronage" line — this is a purchase, not a comp.
     """
+    from app.models.seat import Seat
+    from app.services.ticket_pdf import (
+        ATTACHMENTS_LINE_HTML,
+        ATTACHMENTS_LINE_TEXT,
+        day_ticket_pdfs,
+        ticket_summary_html,
+        ticket_summary_text,
+    )
+
     try:
-        def _day(t):
-            if not t.valid_date:
-                return ""
-            from datetime import date as _date
-
-            try:
-                return f" [{_date.fromisoformat(t.valid_date).strftime('%a %b %-d')}]"
-            except ValueError:
-                return f" [{t.valid_date}]"
-
-        ticket_lines = "\n".join(f"  - {t.code}{_day(t)}" for t in tickets)
-        qr_base = f"{settings.eventnxt_backend_url}/public/tickets"
-        ticket_rows = "".join(
-            f"<tr><td style='padding:10px 12px;text-align:center'>"
-            f"<img src='{qr_base}/{t.code}/qr.png' width='150' height='150' "
-            f"style='display:block;margin:0 auto 6px;border-radius:8px' alt='QR for {t.code}'/>"
-            f"<span style='font-family:monospace;font-size:15px'>{t.code}</span>"
-            + (f"<br/><span style='font-size:13px;font-weight:600'>{_day(t).strip()}</span>" if t.valid_date else "")
-            + f"</td></tr>"
-            for t in tickets
+        seat_ids = [t.seat_id for t in tickets if t.seat_id]
+        seat_by_id = (
+            {s.id: s.label for s in db.query(Seat).filter(Seat.id.in_(seat_ids)).all()} if seat_ids else {}
         )
+        ticket_dicts = [
+            {
+                "code": t.code,
+                "valid_date": t.valid_date,
+                "seat_label": seat_by_id.get(t.seat_id),
+                "holder_name": order.buyer_name,
+            }
+            for t in tickets
+        ]
+        try:
+            attachments = day_ticket_pdfs(event_title, ticket_dicts)
+        except Exception:
+            attachments = None
+
         total = _format_money(order.subtotal_cents, order.currency)
         send_email(
             to=order.buyer_email,
-            subject=f"Your tickets for {event_title}",
+            subject=f"Your ticket{'s' if len(tickets) != 1 else ''} for {event_title}",
             text_body=(
                 f"Hi {order.buyer_name},\n\n"
-                f"You're in! Here are your tickets for {event_title}.\n\n"
+                f"Thank you for your patronage of {event_title}!\n\n"
                 f"Total paid: {total}\n\n"
-                f"Ticket codes:\n{ticket_lines}\n\n"
+                f"{ticket_summary_text(ticket_dicts)}\n\n"
+                f"{ATTACHMENTS_LINE_TEXT}\n"
                 f"View your order any time:\n{order_url}\n\n"
-                "Keep this email — your codes are your admission.\n\n"
                 "— EventNXT"
             ),
             html_body=(
                 f"<p>Hi {order.buyer_name},</p>"
-                f"<p>You're in! Here are your tickets for <strong>{event_title}</strong>.</p>"
+                f"<p>Thank you for your patronage of <strong>{event_title}</strong>!</p>"
                 f"<p>Total paid: <strong>{total}</strong></p>"
-                f"<table>{ticket_rows}</table>"
-                f"<p><a href='{order_url}'>View your order any time</a></p>"
-                "<p>Keep this email — your codes are your admission.</p>"
+                + ticket_summary_html(ticket_dicts)
+                + ATTACHMENTS_LINE_HTML
+                + f"<p><a href='{order_url}'>View your order any time</a></p>"
                 "<p>&mdash; EventNXT</p>"
             ),
+            attachments=attachments,
         )
         return True
     except (EmailNotConfigured, EmailSendError):

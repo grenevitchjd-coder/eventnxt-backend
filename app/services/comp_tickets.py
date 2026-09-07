@@ -355,22 +355,6 @@ def send_comp_ticket_email(db: Session, guest: Guest, tickets: list[Ticket], not
     )
     seat_for = lambda t: seat_by_id.get(t.seat_id)  # noqa: E731
 
-    def day_for(t):
-        if not t.valid_date:
-            return None
-        from datetime import date as _date
-
-        try:
-            return _date.fromisoformat(t.valid_date).strftime("%a %b %-d")
-        except ValueError:
-            return t.valid_date
-
-    codes = "\n".join(
-        f"  {t.code}"
-        + (f"  [{day_for(t)}]" if day_for(t) else "")
-        + (f"  ({seat_for(t)})" if seat_for(t) else "")
-        for t in tickets
-    )
     plural = "s" if len(tickets) > 1 else ""
     when = f"\nDate: {guest.visit_date}" if guest.visit_date else ""
     page = f"\nEvent page: {app_settings.eventnxt_frontend_url}/e/{profile.slug}" if profile and profile.is_published else ""
@@ -379,25 +363,33 @@ def send_comp_ticket_email(db: Session, guest: Guest, tickets: list[Ticket], not
         f"\nSeating: Section {guest.section_label}" if guest.section_label and not seat_ids else ""
     )
     note_text = f"\n\n{note.strip()}" if note and note.strip() else ""
+
+    # Ticket dicts feed BOTH the day-split PDF attachments and the
+    # summary line below — one source, so the two can never disagree
+    # on counts. No code or QR goes in the email body itself; the
+    # attached PDFs are the only place those live (see ticket_pdf.py).
+    from app.services.ticket_pdf import (
+        ATTACHMENTS_LINE_HTML,
+        ATTACHMENTS_LINE_TEXT,
+        day_ticket_pdfs,
+        ticket_summary_html,
+        ticket_summary_text,
+    )
+
+    ticket_dicts = [
+        {"code": t.code, "valid_date": t.valid_date, "seat_label": seat_for(t), "holder_name": guest.name}
+        for t in tickets
+    ]
+
     text = (
         f"Hi {guest.name},\n\n"
         f"You're confirmed for {event_name}.{when}{section_note}{note_text}\n\n"
-        f"Your admission code{plural} — show at the door:\n{codes}\n"
+        f"{ticket_summary_text(ticket_dicts)}\n\n"
+        f"{ATTACHMENTS_LINE_TEXT}\n"
         f"{page}\n\n"
         f"See you there!"
     )
 
-    qr_base = f"{app_settings.eventnxt_backend_url}/public/tickets"
-    code_cells = "".join(
-        f"<tr><td style='padding:10px 12px;text-align:center'>"
-        f"<img src='{qr_base}/{t.code}/qr.png' width='150' height='150' "
-        f"style='display:block;margin:0 auto 6px;border-radius:8px' alt='QR for {t.code}'/>"
-        f"<span style='font-family:monospace;font-size:15px'>{t.code}</span>"
-        + (f"<br/><span style='font-size:13px;font-weight:600'>{day_for(t)}</span>" if day_for(t) else "")
-        + (f"<br/><span style='font-size:13px'>{seat_for(t)}</span>" if seat_for(t) else "")
-        + f"</td></tr>"
-        for t in tickets
-    )
     note_html = (
         f"<p style='background:#FDF6E3;border-left:4px solid #B4890A;padding:8px 12px'><strong>{note.strip()}</strong></p>"
         if note and note.strip()
@@ -409,9 +401,9 @@ def send_comp_ticket_email(db: Session, guest: Guest, tickets: list[Ticket], not
         +
         f"<p>You're confirmed for <strong>{event_name}</strong>.{(' Date: ' + str(guest.visit_date)) if guest.visit_date else ''}"
         f"{(' Seating: Section ' + guest.section_label + '.') if guest.section_label and not seat_ids else ''}</p>"
-        f"<p>Your admission code{plural} — show at the door (scannable or typed):</p>"
-        f"<table>{code_cells}</table>"
-        f"<p>See you there!</p>"
+        + ticket_summary_html(ticket_dicts)
+        + ATTACHMENTS_LINE_HTML
+        + "<p>See you there!</p>"
     )
 
     try:
@@ -421,15 +413,7 @@ def send_comp_ticket_email(db: Session, guest: Guest, tickets: list[Ticket], not
         # headed with the day and its ticket count, one QR block per
         # code. PDF trouble never blocks the email itself.
         try:
-            from app.services.ticket_pdf import day_ticket_pdfs
-
-            attachments = day_ticket_pdfs(
-                event_name,
-                [
-                    {"code": t.code, "valid_date": t.valid_date, "seat_label": seat_for(t), "holder_name": guest.name}
-                    for t in tickets
-                ],
-            )
+            attachments = day_ticket_pdfs(event_name, ticket_dicts)
         except Exception:
             attachments = None
         send_email(to=guest.email, subject=f"Your ticket{plural} for {event_name}", text_body=text, html_body=html, attachments=attachments)

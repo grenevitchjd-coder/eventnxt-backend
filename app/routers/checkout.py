@@ -345,7 +345,7 @@ def start_checkout(slug: str, payload: CheckoutRequest, db: Session = Depends(ge
         tickets = ticketing.fulfill_paid_order(db, order)
         record_native_sales(db, order)
         db.commit()
-        ticketing.send_order_confirmation_email(order, tickets, profile.title, order_url)
+        ticketing.send_order_confirmation_email(db, order, tickets, profile.title, order_url)
         return CheckoutResponse(
             order_token=order.order_token, checkout_url=None, total_cents=0, status="paid"
         )
@@ -665,7 +665,7 @@ async def stripe_webhook(request: Request, db: Session = Depends(get_db)):
             db.commit()  # the paid order is sacred — committed BEFORE any email attempt
             if profile:
                 order_url = f"{settings.eventnxt_frontend_url}/e/{profile.slug}/order/{order.order_token}"
-                ticketing.send_order_confirmation_email(order, tickets, profile.title, order_url)
+                ticketing.send_order_confirmation_email(db, order, tickets, profile.title, order_url)
             return {"status": "fulfilled"}
         db.commit()  # record the webhook event even if the order wasn't actionable
         return {"status": "no_action"}

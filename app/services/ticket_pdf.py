@@ -116,3 +116,54 @@ def day_ticket_pdfs(event_name: str, tickets: list[dict]) -> list[tuple[str, byt
 
         out.append((_day_filename(day), bytes(pdf.output()), "application/pdf"))
     return out
+
+
+def day_ticket_counts(tickets: list[dict]) -> list[tuple[str, int]]:
+    """
+    tickets: [{valid_date, ...}] -> [(day_label, count)], dated days
+    sorted first then undated last — SAME grouping/order as
+    day_ticket_pdfs, so an email's summary line and its attached PDFs
+    can never disagree about how many tickets are in "Friday's" pdf.
+    """
+    by_day: dict = {}
+    for t in tickets:
+        by_day.setdefault(t.get("valid_date"), []).append(t)
+    days = sorted([d for d in by_day if d]) + ([None] if None in by_day else [])
+    return [(_day_label(day), len(by_day[day])) for day in days]
+
+
+# The one line every ticket-delivery email (comp or bought) uses to point
+# at the attachments instead of embedding QR codes in the email body —
+# keeping the body a summary and the PDFs the source of admission codes.
+ATTACHMENTS_LINE_TEXT = (
+    "Your tickets are attached to this email as PDFs (one per day) with "
+    "your admission codes and QR codes for entry."
+)
+ATTACHMENTS_LINE_HTML = (
+    "<p>Your tickets are attached to this email as PDFs (one per day) "
+    "with your admission codes and QR codes for entry.</p>"
+)
+
+
+def ticket_summary_text(tickets: list[dict]) -> str:
+    """Plain-text ticket-count summary — no codes, no QR. Just how many,
+    broken down by day when the tickets span more than one."""
+    total = len(tickets)
+    plural = "s" if total != 1 else ""
+    counts = day_ticket_counts(tickets)
+    if len(counts) <= 1:
+        return f"You have {total} ticket{plural} for this event."
+    lines = "\n".join(f"  {label} \u2014 {n} ticket{'s' if n != 1 else ''}" for label, n in counts)
+    return f"You have {total} ticket{plural} total:\n{lines}"
+
+
+def ticket_summary_html(tickets: list[dict]) -> str:
+    """HTML counterpart to ticket_summary_text — same rule: counts only,
+    never a code or a QR image in the email body itself."""
+    total = len(tickets)
+    plural = "s" if total != 1 else ""
+    counts = day_ticket_counts(tickets)
+    if len(counts) <= 1:
+        return f"<p>You have <strong>{total} ticket{plural}</strong> for this event.</p>"
+    rows = "".join(f"<li>{label} \u2014 {n} ticket{'s' if n != 1 else ''}</li>" for label, n in counts)
+    return f"<p>You have <strong>{total} ticket{plural}</strong> total:</p><ul>{rows}</ul>"
