@@ -354,6 +354,12 @@ def send_comp_ticket_email(db: Session, guest: Guest, tickets: list[Ticket], not
         {s.id: s.label for s in db.query(Seat).filter(Seat.id.in_(seat_ids)).all()} if seat_ids else {}
     )
     seat_for = lambda t: seat_by_id.get(t.seat_id)  # noqa: E731
+    # Section-placed (not seat-specific) guests have no seat_id on any of
+    # their tickets — their section lives on the Guest row instead. Same
+    # gap as the native-purchase path: without this fallback the PDF
+    # mislabels a section-placed comp ticket as "General admission / see
+    # usher" even though the guest was placed in a specific section.
+    section_fallback = f"Section {guest.section_label}" if guest.section_label else None
 
     plural = "s" if len(tickets) > 1 else ""
     when = f"\nDate: {guest.visit_date}" if guest.visit_date else ""
@@ -377,7 +383,7 @@ def send_comp_ticket_email(db: Session, guest: Guest, tickets: list[Ticket], not
     )
 
     ticket_dicts = [
-        {"code": t.code, "valid_date": t.valid_date, "seat_label": seat_for(t), "holder_name": guest.name}
+        {"code": t.code, "valid_date": t.valid_date, "seat_label": seat_for(t) or section_fallback, "holder_name": guest.name}
         for t in tickets
     ]
 

@@ -697,6 +697,7 @@ def guest_door_roster(
         .all()
     )
     ids = [g.id for g in guests]
+    guests_by_id = {g.id: g for g in guests}
     codes_by_guest: dict = {}
     if ids:
         rows = (
@@ -707,13 +708,21 @@ def guest_door_roster(
             .all()
         )
         for ticket, seat in rows:
+            # Section-placed (not seat-specific) guests have no seat_id —
+            # their section lives on the Guest row instead. Without this
+            # fallback the door roster and Guest list's QR panel both
+            # mislabel a section-placed comp ticket as "General
+            # admission" even though the guest was placed somewhere
+            # specific (same gap fixed in comp_tickets.send_comp_ticket_email).
+            guest = guests_by_id.get(ticket.guest_id)
+            section_fallback = f"Section {guest.section_label}" if guest and guest.section_label else None
             codes_by_guest.setdefault(ticket.guest_id, []).append(
                 {
                     "code": ticket.code,
                     "valid_date": ticket.valid_date,
                     "status": ticket.status.value if hasattr(ticket.status, "value") else str(ticket.status),
                     "checked_in_at": ticket.checked_in_at.isoformat() if ticket.checked_in_at else None,
-                    "seat_label": seat.label if seat else None,
+                    "seat_label": (seat.label if seat else None) or section_fallback,
                 }
             )
     out = []

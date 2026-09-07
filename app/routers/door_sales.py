@@ -28,6 +28,7 @@ from app.config import settings
 from app.database import get_db
 from app.models.event_profile import EventProfile
 from app.models.order import Order, OrderStatus
+from app.models.order_item import OrderItem
 from app.models.promo_code import PromoCode
 from app.models.seat import Seat
 from app.models.ticket import Ticket
@@ -170,6 +171,16 @@ def sell_at_door(
 
     seat_ids = [t.seat_id for t in tickets if t.seat_id]
     seat_by_id = {s.id: s.label for s in db.query(Seat).filter(Seat.id.in_(seat_ids)).all()} if seat_ids else {}
+    # Section-sold (unassigned) tickets carry no seat_id — the section
+    # the staffer picked lives on the order item instead (same fallback
+    # get_public_order already uses; missing it here is exactly what
+    # made a door-sold section ticket unidentifiable on screen).
+    item_ids = {t.order_item_id for t in tickets if t.order_item_id}
+    section_by_item = (
+        {i.id: i.section_label for i in db.query(OrderItem).filter(OrderItem.id.in_(item_ids)).all()}
+        if item_ids
+        else {}
+    )
     type_ids = {t.ticket_type_id for t in tickets}
     tts_by_id = {t.id: t for t in db.query(TicketType).filter(TicketType.id.in_(type_ids)).all()} if type_ids else {}
 
@@ -181,7 +192,7 @@ def sell_at_door(
             DoorSaleTicketResponse(
                 code=t.code,
                 ticket_type_name=tts_by_id[t.ticket_type_id].name if t.ticket_type_id in tts_by_id else "Ticket",
-                seat_label=seat_by_id.get(t.seat_id),
+                seat_label=seat_by_id.get(t.seat_id) or section_by_item.get(t.order_item_id),
                 valid_date=t.valid_date,
             )
             for t in tickets

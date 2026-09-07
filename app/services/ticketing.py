@@ -744,11 +744,26 @@ def send_order_confirmation_email(
         seat_by_id = (
             {s.id: s.label for s in db.query(Seat).filter(Seat.id.in_(seat_ids)).all()} if seat_ids else {}
         )
+        # Section-sold (unassigned) tickets have no seat_id at all — the
+        # section the buyer picked lives on the ORDER ITEM instead
+        # (order_item.section_label, e.g. "Section A · Row 1"). Without
+        # this fallback the PDF silently mislabels a specific-section
+        # ticket as "General admission / see usher" — exactly the gap
+        # that made a door-sold section ticket unidentifiable.
+        item_ids = {t.order_item_id for t in tickets if t.order_item_id}
+        section_by_item = (
+            {
+                i.id: i.section_label
+                for i in db.query(OrderItem).filter(OrderItem.id.in_(item_ids)).all()
+            }
+            if item_ids
+            else {}
+        )
         ticket_dicts = [
             {
                 "code": t.code,
                 "valid_date": t.valid_date,
-                "seat_label": seat_by_id.get(t.seat_id),
+                "seat_label": seat_by_id.get(t.seat_id) or section_by_item.get(t.order_item_id),
                 "holder_name": order.buyer_name,
             }
             for t in tickets

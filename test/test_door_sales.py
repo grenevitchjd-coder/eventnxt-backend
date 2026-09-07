@@ -162,6 +162,34 @@ def main():
     r = c.get(f"/events/{EV}/door-sales/reconciliation", params={"start": start.isoformat(), "end": end.isoformat()}, headers=H)
     check("out-of-window sale excluded", r.json()["cash_total_cents"] == 7000, r.json())
 
+    print("6) a section-sold (unassigned) type shows its section on the response, not 'General admission'")
+    row_pool = c.post(f"/events/{EV}/seating-categories",
+                       json={"name": "Row 2", "capacity": 10, "sales_grain": "row", "row_label": "Row 2"},
+                       headers=H).json()
+    c.put(f"/events/{EV}/seating-categories/{row_pool['id']}/sections",
+          json={"sections": [{"section_label": "C", "row_label": "Row 2", "capacity": 4}]}, headers=H)
+    row_tt = c.post(f"/events/{EV}/ticket-types",
+                     json={**TT, "name": "Row 2", "price_cents": 3000, "quantity": 10,
+                           "seating_category_id": row_pool["id"]}, headers=H).json()
+    catalog_row = next(t for t in c.get(f"/events/{EV}/door-sales/catalog", headers=H).json() if t["id"] == row_tt["id"])
+    section_id = catalog_row["sections"][0]["id"]
+    r = c.post(
+        f"/events/{EV}/door-sales/sell",
+        json={
+            "buyer_name": "Row Buyer", "buyer_email": "rowbuyer@x.com",
+            "items": [{"ticket_type_id": row_tt["id"], "quantity": 1, "seat_ids": [], "zone_section_id": section_id, "zone_section_ids": []}],
+            "promo_code": None, "staff_attested_terms": True,
+        },
+        headers=H,
+    )
+    check("row/section sell 200", r.status_code == 200, r.text[:200])
+    row_ticket = r.json()["tickets"][0]
+    check(
+        "seat_label names the section, not General admission",
+        row_ticket.get("seat_label") == "Section C · Row 2",
+        row_ticket,
+    )
+
 
 main()
 print()
