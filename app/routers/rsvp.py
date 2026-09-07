@@ -404,6 +404,40 @@ def respond_to_rsvp(token: str, payload: RSVPRespondRequest, db: Session = Depen
                 tickets = comp_tickets.issue_comp_tickets(db, guest)
                 db.flush()
                 comp_tickets.send_comp_ticket_email(db, guest, tickets)
+        elif guest.seating_category_id:
+            # An organizer-preset area/section (e.g. picked from the
+            # Invites grid's Seating dropdown while the guest was still
+            # PENDING) is a deliberate choice too — it should stick
+            # regardless of how/when the guest confirms, not get
+            # silently overridden by the type's priority walk the
+            # instant they click yes. Found live 2026-09: dropdown set
+            # to "Row 3 Preferred Seating", RSVP yes flipped it back to
+            # the type's own priority target ("Row 1") because only an
+            # actual assigned SEAT was protected before this, not a
+            # bare category/section choice. Still capacity-checked —
+            # room may have changed since it was set — with the same
+            # soft needs-seating landing as an unresolvable priority
+            # walk, never a lost yes.
+            try:
+                seating.check_capacity(
+                    db, str(guest.event_id), str(guest.seating_category_id),
+                    party_size=guest.party_size, exclude_guest_id=guest.id,
+                )
+                if guest.section_label:
+                    seating.check_section_capacity(
+                        db, str(guest.event_id), str(guest.seating_category_id), guest.section_label,
+                        party_size=guest.party_size, exclude_guest_id=guest.id,
+                    )
+                guest.allocation_status = GuestAllocationStatus.CONFIRMED
+                guest.rsvp_confirmed = "yes"
+                guest.needs_seating = False
+                if comp_tickets.is_native_ticketing(db, guest.event_id):
+                    tickets = comp_tickets.issue_comp_tickets(db, guest)
+                    db.flush()
+                    comp_tickets.send_comp_ticket_email(db, guest, tickets)
+            except HTTPException:
+                guest.rsvp_confirmed = "yes"
+                guest.needs_seating = True
         elif new_category_id is None and seating.has_seating_priorities(db, str(guest.guest_type_id)):
             # SOFT landing, not a hard error: the yes is recorded, no seat
             # is claimed (allocation stays PENDING so capacity math never

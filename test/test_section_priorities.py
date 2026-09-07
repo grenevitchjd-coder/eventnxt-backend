@@ -11,6 +11,8 @@
 #   8. seat-grain pools: room = free unblocked seats minus seatless comps
 #   9. seat-grain auto-pick: a confirmed comp in a seat-grain section
 #      lands on a REAL seat, not just the section name (2026-09 fix)
+#  10. organizer preset (category/section set on a still-PENDING guest)
+#      survives RSVP yes — wins over the type's own priority walk (2026-09 fix)
 #
 # Run: DATABASE_URL="postgresql://test@/eventnxt_test?host=/tmp&port=5433" python3 test/test_section_priorities.py
 import os
@@ -201,6 +203,34 @@ def main():
     gz2 = add_guest(gtz["id"], "Robin Comp", 1).json()
     check("auto-pick: a second guest gets a DIFFERENT seat",
           gz2.get("seat_labels") and gz2["seat_labels"] != gz1["seat_labels"], (gz1.get("seat_labels"), gz2.get("seat_labels")))
+
+    print("10) organizer PRESET on a pending guest survives RSVP yes, overriding the type's priority walk")
+    # gtz's own priorities point at p3/K (seat-grain "Balcony") — preset
+    # THIS guest at an unrelated pool instead while still pending, then
+    # have them self-RSVP. Before the fix, RSVP yes always re-ran the
+    # priority walk from scratch and silently moved them to p3/K,
+    # discarding the organizer's explicit dropdown choice — only an
+    # actual assigned SEAT was protected, never a bare category/section
+    # preset (found live 2026-09).
+    fresh_pool = client.post(
+        f"/events/{EV}/seating-categories",
+        json={"name": "Preset Test Pool", "capacity": 10, "sales_grain": "ga"},
+        headers=H,
+    ).json()
+    preset_guest = add_guest(gtz["id"], "Preset Guest", 1, category_id=fresh_pool["id"], status="pending").json()
+    check(
+        "preset guest starts pending with the organizer's chosen area",
+        preset_guest["allocation_status"] == "pending" and str(preset_guest.get("seating_category_id")) == str(fresh_pool["id"]),
+        preset_guest,
+    )
+    r = client.post(f"/public/rsvp/{preset_guest['rsvp_token']}/respond", json={"attending": True})
+    check("rsvp yes 200", r.status_code == 200, r.text[:200])
+    confirmed = next(g for g in client.get(f"/events/{EV}/guests", headers=H).json() if g["id"] == preset_guest["id"])
+    check(
+        "preset wins over the type's own priority target (p3/K) — not silently reassigned",
+        confirmed["allocation_status"] == "confirmed" and str(confirmed.get("seating_category_id")) == str(fresh_pool["id"]),
+        confirmed,
+    )
 
     print()
     if failures:
