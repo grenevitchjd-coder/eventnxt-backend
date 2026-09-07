@@ -302,6 +302,19 @@ def update_guest(
         and guest.party_size == payload.party_size
     )
     new_section_label = (payload.section_label or "").strip() or None
+    # Did the guest's INTENDED area/section actually change? (captured
+    # before either field gets overwritten below.) If so, any seat they
+    # currently hold belongs to the OLD pool/section and is now simply
+    # wrong for them — nothing else in this endpoint ever released it or
+    # re-stamped their tickets, so an edit here silently left already-
+    # sent tickets pointing at a stale seat forever, with no fix even
+    # from "Update & resend" (it only re-stamps whatever seat the guest
+    # CURRENTLY holds). Found live 2026-09: "Row 3 Preferred Seating"
+    # selected, ticket still showing the old "Row 1" seat.
+    placement_changed = (
+        str(guest.seating_category_id or "") != str(payload.seating_category_id or "")
+        or (guest.section_label or None) != new_section_label
+    )
     if payload.seating_category_id and (payload.allocation_status == "confirmed" or payload.hold_timing == "now") and not already_confirmed_here:
         seating.check_capacity(
             db, event_id, payload.seating_category_id, party_size=payload.party_size, exclude_guest_id=guest.id
@@ -336,6 +349,15 @@ def update_guest(
     guest.hold_timing = payload.hold_timing or guest.hold_timing or "now"
     guest.spend_total = payload.spend_total
     guest.cohort_together = payload.cohort_together
+    if placement_changed:
+        # Release the now-stale seat (fully — back to general
+        # availability, same "wrong for this guest now" rule as a
+        # delete/decline) and re-stamp so any already-sent ticket
+        # immediately shows an honest "Section X" fallback instead of
+        # the old seat, rather than silently lying until someone
+        # notices and manually reassigns via the Seats picker.
+        seats_service.release_seats_for_guest(db, guest.id)
+        seats_service.restamp_guest_tickets(db, guest)
     # Recipient seating intent (0041): organizer-only fields — where this
     # allotment's recipients land, ahead of the type's priorities.
     guest.recipient_seating_category_id = payload.recipient_seating_category_id

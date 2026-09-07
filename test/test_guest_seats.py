@@ -11,6 +11,8 @@
 #      tickets re-stamp to exactly {4,6}
 #   6. RSVP no -> seats release from guest but stay reserved
 #   7. assign-then-mint and mint-then-assign converge (guest 2)
+#   8. editing a CONFIRMED guest's seating area releases the OLD seat and
+#      clears the stale seat off their ticket (2026-09 fix)
 #
 # Run: DATABASE_URL="postgresql://test@/eventnxt_test?host=/tmp&port=5433" python3 test/test_guest_seats.py
 import os
@@ -212,6 +214,58 @@ def main():
     client.post(f"/public/rsvp/{guest2['rsvp_token']}/respond", json={"attending": True})
     nums, n_tickets = db_ticket_seats(guest2["id"])
     check("guest2 mints 1 ticket stamped 5", n_tickets == 1 and nums == {5}, f"{n_tickets} {nums}")
+
+    # ---- 8. editing a CONFIRMED guest's seating area releases the OLD
+    #         seat and re-stamps their ticket — found live 2026-09: the
+    #         grid dropdown changed to a different area, but the already-
+    #         sent ticket kept showing the stale seat forever, with no
+    #         fix even from Update & resend (it only re-stamps whatever
+    #         seat the guest CURRENTLY holds, which was never released) ----
+    pool2 = client.post(
+        f"/events/{EV}/seating-categories",
+        json={"name": "Row 2", "capacity": 1, "sales_grain": "seat", "row_label": "Row 2"},
+        headers=H,
+    ).json()
+    client.put(
+        f"/events/{EV}/seating-categories/{pool2['id']}/sections",
+        json={"sections": [{"section_label": "B", "row_label": "Row 2", "capacity": 4}]},
+        headers=H,
+    )
+    seats2 = client.get(f"/events/{EV}/seating-categories/{pool2['id']}/seats", headers=H).json()
+    by_num2 = {s["seat_number"]: s for s in seats2}
+
+    guest3 = client.post(
+        f"/events/{EV}/guests",
+        json={"name": "Row Mover", "email": "rowmover@x.com", "guest_type_id": gt["id"],
+              "seating_category_id": pool["id"], "allocation_status": "confirmed", "party_size": 1},
+        headers=H,
+    ).json()
+    r = client.put(f"/events/{EV}/guests/{guest3['id']}/seats", json={"seat_ids": [by_num[6]["id"]]}, headers=H)
+    check("guest3 assigned seat 6 in pool 1", r.status_code == 200, r.text)
+    nums, n_tickets = db_ticket_seats(guest3["id"])
+    check("guest3's ticket stamped with pool-1 seat 6", n_tickets == 1 and nums == {6}, f"{n_tickets} {nums}")
+
+    r = client.patch(
+        f"/events/{EV}/guests/{guest3['id']}",
+        json={"name": "Row Mover", "email": "rowmover@x.com", "guest_type_id": gt["id"],
+              "seating_category_id": pool2["id"], "section_label": "B", "visit_date": None,
+              "allocation_status": "confirmed", "party_size": 1, "perks": None, "comments": None},
+        headers=H,
+    )
+    check("moved guest3 to pool 2 / section B", r.status_code == 200, r.text)
+
+    old_pool_seats = {s["seat_number"]: s for s in client.get(f"/events/{EV}/seating-categories/{pool['id']}/seats", headers=H).json()}
+    check(
+        "old pool-1 seat 6 released back to available, not left orphaned reserved",
+        old_pool_seats[6]["guest_name"] is None and old_pool_seats[6]["status"] == "available",
+        old_pool_seats[6],
+    )
+    nums, n_tickets = db_ticket_seats(guest3["id"])
+    check(
+        "guest3's ticket no longer shows the STALE pool-1 seat (cleared, not carried over)",
+        nums == set(),
+        f"{n_tickets} {nums}",
+    )
 
     print()
     if failures:
