@@ -584,6 +584,43 @@ def section_room_for_comps(db: Session, category: SeatingCategory, section_label
     return max(capacity - box_office - comp_heads_here, 0)
 
 
+def spread_pick_section(db: Session, category_id, party_size: int, exclude_guest_id=None):
+    """
+    For an EXPLICIT "Anywhere" choice — an organizer picked the AREA
+    directly (via the Invites/Allotments grid dropdown, or the create
+    payload), leaving the section blank — spread to whichever section
+    currently has the most room, the same heuristic
+    resolve_seating_placement already uses for a type's 'spread'
+    priority entry. That heuristic previously only fired for guests who
+    went through the TYPE'S priority walk; an explicit pick bypasses
+    the walk entirely by design ("no priority-list magic"), so it never
+    got a section at all — the ticket just named the area with nothing
+    more specific, even when the area clearly has several sections with
+    room (found live 2026-09: "Row 3 Preferred Seating" / Anywhere).
+    Returns None when the pool has no sections at all (GA/table types —
+    nothing to spread across) or none currently fit `party_size`.
+    """
+    from app.models.zone_section import ZoneSection
+
+    category = db.query(SeatingCategory).filter(SeatingCategory.id == category_id).first()
+    if not category:
+        return None
+    labels = [
+        r[0]
+        for r in db.query(ZoneSection.section_label)
+        .filter(ZoneSection.seating_category_id == category_id)
+        .distinct()
+        .all()
+    ]
+    if not labels:
+        return None
+    labels.sort(key=lambda lbl: -section_room_for_comps(db, category, lbl, exclude_guest_id=exclude_guest_id))
+    for lbl in labels:
+        if section_room_for_comps(db, category, lbl, exclude_guest_id=exclude_guest_id) >= party_size:
+            return lbl
+    return None
+
+
 def resolve_seating_placement(
     db: Session, event_id: str, guest_type_id: str, party_size: int = 1, visit_date=None,
     allocated_by_guest_id=None, cohort_together: bool = True,

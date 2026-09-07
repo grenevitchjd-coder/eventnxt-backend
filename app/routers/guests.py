@@ -126,6 +126,15 @@ def create_guest(
         effective_section_label = (payload.section_label or "").strip() or None
         if payload.allocation_status == "confirmed" or payload.hold_timing == "now":
             seating.check_capacity(db, event_id, effective_seating_category_id, party_size=payload.party_size)
+            # "Anywhere" on an area that actually HAS sections spreads to
+            # whichever has the most room (2026-09 fix) — an explicit
+            # pick bypasses the type's priority walk entirely, so it
+            # never got this treatment before even when the area clearly
+            # has several sections with room.
+            if not effective_section_label:
+                effective_section_label = seating.spread_pick_section(
+                    db, effective_seating_category_id, payload.party_size
+                )
         else:
             category = (
                 db.query(SeatingCategory)
@@ -302,6 +311,18 @@ def update_guest(
         and guest.party_size == payload.party_size
     )
     new_section_label = (payload.section_label or "").strip() or None
+    # "Anywhere" on an area that actually HAS sections spreads to
+    # whichever has the most room (2026-09 fix) — same treatment as
+    # create_guest's explicit path; editing a guest is just as explicit
+    # as creating one, and previously never got this either.
+    if (
+        not new_section_label
+        and payload.seating_category_id
+        and (payload.allocation_status == "confirmed" or payload.hold_timing == "now")
+    ):
+        new_section_label = seating.spread_pick_section(
+            db, payload.seating_category_id, payload.party_size, exclude_guest_id=guest.id
+        )
     # Did the guest's INTENDED area/section actually change? (captured
     # before either field gets overwritten below.) If so, any seat they
     # currently hold belongs to the OLD pool/section and is now simply

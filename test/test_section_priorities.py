@@ -13,6 +13,8 @@
 #      lands on a REAL seat, not just the section name (2026-09 fix)
 #  10. organizer preset (category/section set on a still-PENDING guest)
 #      survives RSVP yes — wins over the type's own priority walk (2026-09 fix)
+#  11. explicit "Anywhere" on an area WITH sections spreads across them
+#      instead of staying blank forever (2026-09 fix)
 #
 # Run: DATABASE_URL="postgresql://test@/eventnxt_test?host=/tmp&port=5433" python3 test/test_section_priorities.py
 import os
@@ -230,6 +232,54 @@ def main():
         "preset wins over the type's own priority target (p3/K) — not silently reassigned",
         confirmed["allocation_status"] == "confirmed" and str(confirmed.get("seating_category_id")) == str(fresh_pool["id"]),
         confirmed,
+    )
+
+    print("11) explicit 'Anywhere' on an area WITH sections spreads across them, not left blank")
+    # An organizer picking the AREA directly (Invites/Allotments grid,
+    # or create) and leaving the section as "Anywhere" now spreads to
+    # whichever section has the most room — this bypasses the type's
+    # priority walk entirely (no priorities configured here at all),
+    # so before this fix the section simply stayed unset forever, and
+    # the ticket named only the area with nothing more specific
+    # (found live 2026-09: "Row 3 Preferred Seating" / Anywhere).
+    spread_pool = client.post(
+        f"/events/{EV}/seating-categories",
+        json={"name": "Spread Test", "capacity": 3, "sales_grain": "row"},
+        headers=H,
+    ).json()
+    client.put(
+        f"/events/{EV}/seating-categories/{spread_pool['id']}/sections",
+        json={"sections": [{"section_label": "X", "capacity": 1}, {"section_label": "Y", "capacity": 1}, {"section_label": "Z", "capacity": 1}]},
+        headers=H,
+    )
+    gt_spread = client.post(f"/events/{EV}/guest-types", json={"name": "Spread Guest", "guest_mode": "invite"}, headers=H).json()
+
+    def add_spread_guest(name):
+        return client.post(
+            f"/events/{EV}/guests",
+            json={
+                "name": name, "email": f"{name.lower().replace(' ', '')}@x.com", "guest_type_id": gt_spread["id"],
+                "allocation_status": "confirmed", "party_size": 1, "guest_mode": "invite",
+                "seating_category_id": spread_pool["id"],
+                # section_label deliberately omitted — this IS "Anywhere"
+            },
+            headers=H,
+        ).json()
+
+    s1 = add_spread_guest("Spread One")
+    check("guest 1: Anywhere resolved to an ACTUAL section, not left blank", bool(s1.get("section_label")), s1)
+    s2 = add_spread_guest("Spread Two")
+    check("guest 2: Anywhere resolved to an actual section too", bool(s2.get("section_label")), s2)
+    check(
+        "guest 2 spread to a DIFFERENT section (guest 1's is now full)",
+        s2.get("section_label") != s1.get("section_label"),
+        (s1.get("section_label"), s2.get("section_label")),
+    )
+    s3 = add_spread_guest("Spread Three")
+    check(
+        "guest 3 spread to the third remaining section",
+        s3.get("section_label") not in (s1.get("section_label"), s2.get("section_label")),
+        (s1.get("section_label"), s2.get("section_label"), s3.get("section_label")),
     )
 
     print()
