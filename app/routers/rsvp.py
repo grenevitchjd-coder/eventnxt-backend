@@ -12,6 +12,7 @@ from app.models.guest_type import GuestType
 from app.models.promo_code import PromoCode, RewardType
 from app.models.reward_redemption import RewardRedemption
 from app.models.guest_ticket_request import GuestTicketRequest
+from app.models.guest_ticket_allotment import GuestTicketAllotment
 from app.models.seating_category import SeatingCategory
 from app.schemas.rsvp import (
     PayoutTermsAcceptRequest,
@@ -420,11 +421,21 @@ def respond_to_rsvp(token: str, payload: RSVPRespondRequest, db: Session = Depen
             guest.needs_seating = False
             # A comp landing in a SEAT-GRAIN area needs a REAL seat, not
             # just a section name — the priority walk is deliberately
-            # grain-agnostic and stops at (category, section). Auto-pick
-            # completes it here (2026-09 fix).
+            # grain-agnostic and stops at (category, section). A MULTI-
+            # day guest needs the SAME seat identity across every one of
+            # their nights' sibling pools, not just this one (2026-09 fix
+            # — night one got a real seat, every other night fell back
+            # to a bare section).
             _cat = db.query(SeatingCategory).filter(SeatingCategory.id == new_category_id).first()
             if _cat and _cat.sales_grain == "seat":
-                picked = seats_service.pick_available_seats(db, new_category_id, new_section_label, guest.party_size)
+                days = [
+                    d
+                    for (d,) in db.query(GuestTicketAllotment.date)
+                    .filter(GuestTicketAllotment.guest_id == guest.id, GuestTicketAllotment.quantity > 0)
+                    .all()
+                ] or ([guest.visit_date] if guest.visit_date else [])
+                pool_ids = seating.sibling_pool_ids_for_days(db, new_category_id, days)
+                picked = seats_service.pick_available_seat_family(db, pool_ids, new_section_label, guest.party_size)
                 if picked:
                     seats_service.assign_guest_seats(db, guest=guest, seat_ids=picked)
             # Selling through EventNXT: a confirmed yes mints and emails

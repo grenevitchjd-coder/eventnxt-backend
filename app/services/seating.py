@@ -114,6 +114,24 @@ def pool_for_day(db: Session, base_pool_id, visit_date):
     return sibling.seating_category_id if sibling else base_pool_id
 
 
+def sibling_pool_ids_for_days(db: Session, base_category_id, days) -> list:
+    """
+    base_category_id plus the day-mapped sibling (via pool_for_day) for
+    every day in `days`, deduplicated, base pool first. This is the
+    pool list a multi-day comp guest's seat needs to be claimed across
+    — see seats.pick_available_seat_family, which finds one seat
+    IDENTITY free in every pool here so the guest gets the same chair
+    each night instead of a seat on night one and a bare section label
+    on every other night (2026-09 fix).
+    """
+    ids = [base_category_id]
+    for d in days:
+        sib = pool_for_day(db, base_category_id, d)
+        if sib not in ids:
+            ids.append(sib)
+    return ids
+
+
 POOL_DAY_SUFFIX = re.compile(r"\s*\((\d{2})/(\d{2})\)$")
 
 

@@ -391,6 +391,69 @@ def pick_available_seats(db: Session, category_id, section_label: str | None, co
     return [s.id for s in candidates if s.id not in taken][:count]
 
 
+def pick_available_seat_family(db: Session, category_ids: list, section_label: str | None, count: int) -> list[uuid.UUID]:
+    """
+    Multi-day version of pick_available_seats: a comp guest with a
+    dated ticket for SEVERAL nights needs the SAME physical chair every
+    night — the same guarantee a buyer's all-days seated pass already
+    gets (lock_and_hold_pass_seats) — not just a seat picked in
+    whichever pool happened to resolve first. category_ids is the
+    guest's home pool plus that night's sibling for every OTHER day
+    they hold a ticket (via pool_for_day); a single-pool list is just
+    pick_available_seats.
+
+    Candidate identities (section, row, seat_number) come from the
+    FIRST pool's free seats; an identity only counts if the SAME
+    identity is free (unblocked, unassigned, unsold) in EVERY pool in
+    the list. Returns the actual seat ids to claim — one per pool per
+    matched identity — so assigning them all stamps every night's
+    ticket with one consistent seat (restamp_guest_tickets already
+    knows a seat belongs to whichever night's pool it's in). An
+    identity missing or unavailable on any single night is skipped
+    entirely rather than leaving that night unseated.
+    """
+    if not category_ids:
+        return []
+    if len(category_ids) == 1:
+        return pick_available_seats(db, category_ids[0], section_label, count)
+
+    first, *rest = category_ids
+    q = db.query(Seat).filter(Seat.seating_category_id == first, Seat.guest_id.is_(None), Seat.is_blocked.is_(False))
+    if section_label is not None:
+        q = q.filter(Seat.section_label == section_label)
+    first_candidates = q.order_by(Seat.row_label, Seat.seat_number).with_for_update().all()
+    first_taken = taken_seat_ids(db, [s.id for s in first_candidates])
+    first_free = [s for s in first_candidates if s.id not in first_taken]
+
+    result_ids: list[uuid.UUID] = []
+    matched = 0
+    for seat in first_free:
+        if matched >= count:
+            break
+        row_label, seat_number = seat.row_label, seat.seat_number
+        group_ids = [seat.id]
+        ok = True
+        for pool_id in rest:
+            sib_q = db.query(Seat).filter(
+                Seat.seating_category_id == pool_id,
+                Seat.section_label == seat.section_label,
+                Seat.seat_number == seat_number,
+            )
+            sib_q = sib_q.filter(Seat.row_label.is_(None)) if row_label is None else sib_q.filter(Seat.row_label == row_label)
+            sib = sib_q.with_for_update().first()
+            if not sib or sib.guest_id is not None or sib.is_blocked:
+                ok = False
+                break
+            group_ids.append(sib.id)
+        if not ok:
+            continue
+        if taken_seat_ids(db, group_ids[1:]):
+            continue
+        result_ids.extend(group_ids)
+        matched += 1
+    return result_ids
+
+
 def take_held_seats(db: Session, holder_id, category_id, section_label, recipient, count: int) -> list[uuid.UUID]:
     """
     Transfer up to `count` seats an allotment HOLDER already reserved
