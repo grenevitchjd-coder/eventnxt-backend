@@ -44,6 +44,7 @@ from app.schemas.ticketing import (
 )
 from app.services import ticketing
 from app.services import seating
+from app.services.lookups import ci_equals
 from app.services.native_sales import record_native_sales
 from app.services.stripe_gateway import WebhookNotConfigured, construct_webhook_event, create_checkout_session
 
@@ -107,7 +108,7 @@ def start_checkout(slug: str, payload: CheckoutRequest, db: Session = Depends(ge
     if code_text:
         promo_code = (
             db.query(PromoCode)
-            .filter(PromoCode.event_id == profile.event_id, PromoCode.code.ilike(code_text))
+            .filter(PromoCode.event_id == profile.event_id, ci_equals(PromoCode.code, code_text))
             .first()
         )
         if not promo_code:
@@ -254,7 +255,7 @@ def check_public_promo_code(slug: str, code: str, db: Session = Depends(get_db))
     profile = _published_profile_or_404(db, slug)
     promo = (
         db.query(PromoCode)
-        .filter(PromoCode.event_id == profile.event_id, PromoCode.code.ilike(code.strip()))
+        .filter(PromoCode.event_id == profile.event_id, ci_equals(PromoCode.code, code.strip()))
         .first()
     )
     if not promo:
@@ -276,7 +277,7 @@ def record_promo_link_click(slug: str, code: str, r: str | None = None, db: Sess
     """
     profile = _published_profile_or_404(db, slug)
     db.query(PromoCode).filter(
-        PromoCode.event_id == profile.event_id, PromoCode.code.ilike(code.strip())
+        PromoCode.event_id == profile.event_id, ci_equals(PromoCode.code, code.strip())
     ).update({PromoCode.link_clicks: PromoCode.link_clicks + 1}, synchronize_session=False)
     if r:
         # Outreach link landing — stamp the invited person's first click.

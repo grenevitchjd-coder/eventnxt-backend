@@ -5,6 +5,7 @@ from sqlalchemy.orm import Session
 
 from sqlalchemy import func
 
+from app.services.lookups import ci_equals
 from app.models.promo_code import PromoCode, RewardType
 from app.models.referral_contact import ReferralContact
 from app.models.sale import Sale
@@ -64,7 +65,7 @@ def points_for_ticket_type(db: Session, promo_code_id: str, ticket_type: Optiona
         return 0
     rate = (
         db.query(PromoCodePointsRate)
-        .filter(PromoCodePointsRate.promo_code_id == promo_code_id, PromoCodePointsRate.ticket_type.ilike(ticket_type))
+        .filter(PromoCodePointsRate.promo_code_id == promo_code_id, ci_equals(PromoCodePointsRate.ticket_type, ticket_type))
         .first()
     )
     return rate.points if rate else 0
@@ -120,7 +121,7 @@ def reconcile_sale_row(db: Session, event_id: str, row: dict) -> Sale:
     if code_text:
         promo_code = (
             db.query(PromoCode)
-            .filter(PromoCode.event_id == event_id, PromoCode.code.ilike(code_text))
+            .filter(PromoCode.event_id == event_id, ci_equals(PromoCode.code, code_text))
             .first()
         )
 
@@ -137,7 +138,7 @@ def reconcile_sale_row(db: Session, event_id: str, row: dict) -> Sale:
     if buyer_email:
         matches = (
             db.query(ReferralContact)
-            .filter(ReferralContact.event_id == event_id, ReferralContact.email.ilike(buyer_email.strip()))
+            .filter(ReferralContact.event_id == event_id, ci_equals(ReferralContact.email, buyer_email.strip()))
             .limit(2)
             .all()
         )

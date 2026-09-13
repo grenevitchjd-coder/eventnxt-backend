@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from sqlalchemy.orm import Session
 
 from app.models.referral_contact import ReferralContact
+from app.services.lookups import ci_equals
 
 
 def single_match_contact(db: Session, event_id, buyer_email: str):
@@ -24,7 +25,7 @@ def single_match_contact(db: Session, event_id, buyer_email: str):
         return None
     matches = (
         db.query(ReferralContact)
-        .filter(ReferralContact.event_id == event_id, ReferralContact.email.ilike(buyer_email.strip()))
+        .filter(ReferralContact.event_id == event_id, ci_equals(ReferralContact.email, buyer_email.strip()))
         .limit(2)
         .all()
     )

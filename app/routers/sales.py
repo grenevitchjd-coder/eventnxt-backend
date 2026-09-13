@@ -50,6 +50,7 @@ from app.schemas.sales import (
 from app.services import bonuses as bonuses_service
 from app.services import redemptions as redemptions_service
 from app.services.comp_tickets import event_days_for
+from app.services.lookups import ci_equals
 from app.services.seating import normalized_name
 from app.models.seating_category import SeatingCategory
 from app.services import sale_matching
@@ -178,7 +179,7 @@ def create_promo_code(
 
     existing = (
         db.query(PromoCode)
-        .filter(PromoCode.event_id == event_id, PromoCode.code.ilike(payload.code))
+        .filter(PromoCode.event_id == event_id, ci_equals(PromoCode.code, payload.code))
         .first()
     )
     if existing:
@@ -234,7 +235,7 @@ def update_promo_code(
     if payload.code.lower() != code.code.lower():
         existing = (
             db.query(PromoCode)
-            .filter(PromoCode.event_id == event_id, PromoCode.code.ilike(payload.code), PromoCode.id != code_id)
+            .filter(PromoCode.event_id == event_id, ci_equals(PromoCode.code, payload.code), PromoCode.id != code_id)
             .first()
         )
         if existing:
@@ -326,7 +327,7 @@ def create_referrer(
     """
     existing = (
         db.query(Guest)
-        .filter(Guest.event_id == event_id, Guest.email.ilike(payload.email))
+        .filter(Guest.event_id == event_id, ci_equals(Guest.email, payload.email))
         .first()
     )
     if existing:

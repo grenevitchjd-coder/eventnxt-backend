@@ -42,6 +42,7 @@ from app.models.event_profile import EventProfile
 from app.models.referral_contact import ReferralContact
 from app.models.sale import Sale
 from app.services import email as email_service
+from app.services.lookups import ci_equals
 from app.config import settings
 from app.services import seating
 from app.services import comp_tickets
@@ -779,7 +780,7 @@ def refer_people(token: str, payload: RSVPReferRequest, db: Session = Depends(ge
     for person in payload.contacts:
         contact = (
             db.query(ReferralContact)
-            .filter(ReferralContact.promo_code_id == code.id, ReferralContact.email.ilike(person.email))
+            .filter(ReferralContact.promo_code_id == code.id, ci_equals(ReferralContact.email, person.email))
             .first()
         )
         if contact is None:

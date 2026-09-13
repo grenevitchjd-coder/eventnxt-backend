@@ -44,6 +44,7 @@ from app.schemas.ticketing import (
 )
 from app.services import seating, ticketing
 from app.services.deps import CurrentUser
+from app.services.lookups import ci_equals
 from app.services.native_sales import record_native_sales
 from app.services.permissions import require_guest_list
 
@@ -85,7 +86,7 @@ def door_sales_check_promo_code(
 ):
     promo = (
         db.query(PromoCode)
-        .filter(PromoCode.event_id == event_id, PromoCode.code.ilike(code.strip()))
+        .filter(PromoCode.event_id == event_id, ci_equals(PromoCode.code, code.strip()))
         .first()
     )
     if not promo:
@@ -122,7 +123,7 @@ def sell_at_door(
     if code_text:
         promo_code = (
             db.query(PromoCode)
-            .filter(PromoCode.event_id == event_id, PromoCode.code.ilike(code_text))
+            .filter(PromoCode.event_id == event_id, ci_equals(PromoCode.code, code_text))
             .first()
         )
         if not promo_code:
