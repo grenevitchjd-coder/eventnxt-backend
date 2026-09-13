@@ -40,6 +40,11 @@ from app.services.event_access import require_event_access
 email_mod.send_email = lambda **kw: None
 
 EV, ORG = str(uuid.uuid4()), str(uuid.uuid4())
+STAFFER = str(uuid.uuid4())  # sold_by_user_id is a real UUID column (0053) —
+# Events360 user ids are UUIDs, same as organization_id/event_id everywhere
+# else in this app; a placeholder like "staffer-1" isn't a valid Events360
+# id and only ever surfaces here because this is the one place user_id
+# gets persisted rather than just carried around in memory.
 failures = []
 
 
@@ -50,7 +55,7 @@ def check(name, cond, extra=""):
 
 
 class U:
-    user_id = "staffer-1"; organization_id = ORG; name = "Alex Door"; email = "alex@x.com"; role = "staff"; raw_token = "tok"
+    user_id = STAFFER; organization_id = ORG; name = "Alex Door"; email = "alex@x.com"; role = "staff"; raw_token = "tok"
     event_data = {"organization_id": ORG, "name": "Door Sales Test", "start_date": "2026-12-24", "end_date": "2026-12-24"}
 
 
@@ -186,7 +191,10 @@ def main():
     row_ticket = r.json()["tickets"][0]
     check(
         "seat_label names the section, not General admission",
-        row_ticket.get("seat_label") == "Section C · Row 2",
+        # format_unit_label's documented, canonical order is row-then-
+        # section ("Row 2 · Section C") — this pins that ordering, not
+        # the reverse.
+        row_ticket.get("seat_label") == "Row 2 · Section C",
         row_ticket,
     )
 
