@@ -22,16 +22,34 @@ view, everything else needs manage. require_area(...) accepts several
 areas as ANY-OF — used where one route serves two pages (e.g. editing a
 guest happens from both Invites and Guest list).
 
-Rollout note: a userinfo payload with NO permissions field means Events360
-hasn't deployed the permissions bridge yet — treated as all=True so
-deploying this app first can't lock every staff member out. Events360
-should still deploy first, per the standing backend-before-consumer rule.
+Rollout note: a userinfo payload with NO permissions field AT ALL means
+Events360 hasn't deployed the permissions bridge yet. While
+`settings.permissions_bridge_required` is False (the default, for the
+rollout window), that's treated as all=True so deploying this app first
+can't lock every staff member out. Events360 should still deploy first,
+per the standing backend-before-consumer rule — and once its permissions
+bridge is confirmed live for every organization on EventNXT, flip
+PERMISSIONS_BRIDGE_REQUIRED=true so a missing field can never again mean
+"grant everything": at that point it's not a rollout gap, it's Events360
+failing to tell us who someone is, and the safe answer is DENY, not allow.
+Either way, every time the missing-field fallback actually fires, it's
+logged — a fail-open default should never be silent.
+
+Distinct from a MISSING field: a permissions object that's simply present
+but empty (`{}`, or `{"all": false}` with no grants at all) is a real
+answer from Events360 — "this user has zero grants" — and correctly
+denies everything below. It is never treated as the pre-bridge case.
 """
+
+import logging
 
 from fastapi import Depends, HTTPException, Request
 
+from app.config import settings
 from app.services.deps import CurrentUser
 from app.services.event_access import require_event_access
+
+logger = logging.getLogger("eventnxt.permissions")
 
 READ_METHODS = {"GET", "HEAD", "OPTIONS"}
 
@@ -47,10 +65,29 @@ AREA_LABELS = {
 
 def grants_for_event(user: CurrentUser, event_id: str):
     """The user's effective key set for this event, or None meaning
-    'everything' (owner/org_admin, or pre-bridge Events360)."""
+    'everything' (owner/org_admin, or — only during rollout — a
+    pre-bridge Events360 payload missing the field entirely)."""
     perms = getattr(user, "permissions", None)
-    if not perms or perms.get("all"):
+    if perms is None:
+        # The field is ABSENT, not empty — Events360 hasn't sent it yet.
+        if settings.permissions_bridge_required:
+            logger.warning(
+                "Permissions field missing for user %s on event %s; "
+                "PERMISSIONS_BRIDGE_REQUIRED is set, denying instead of "
+                "falling back to all-access.",
+                getattr(user, "user_id", "?"), event_id,
+            )
+            return set()
+        logger.warning(
+            "Permissions field missing for user %s on event %s; falling "
+            "back to all-access (pre-bridge rollout default — set "
+            "PERMISSIONS_BRIDGE_REQUIRED=true once Events360's bridge is "
+            "confirmed live).",
+            getattr(user, "user_id", "?"), event_id,
+        )
         return None
+    if perms.get("all"):
+        return None  # an explicit owner/org_admin grant, not a fallback
     granted = set(perms.get("org_wide") or [])
     granted |= set((perms.get("by_event") or {}).get(str(event_id)) or [])
     return granted

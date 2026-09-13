@@ -60,6 +60,17 @@ class Settings(BaseSettings):
     # the live-key swap.
     stripe_require_connected_account: bool = False
 
+    # Permissions-bridge enforcement (services/permissions.py). False
+    # (default): a userinfo payload with NO permissions field at all is
+    # treated as all-access — the pre-bridge rollout fallback, so
+    # deploying this app before Events360 ships its permissions bridge
+    # can't lock every staff member out. True: that same missing-field
+    # case is DENIED instead. Flip to true once Events360's permissions
+    # bridge is confirmed deployed and sending the field for every
+    # organization on EventNXT — the same "verify, then flip the switch"
+    # pattern as STRIPE_REQUIRE_CONNECTED_ACCOUNT.
+    permissions_bridge_required: bool = False
+
     # EventNXT's platform fee, baked into the ticket's face value: the
     # buyer sees a clean price, the organizer bears the fee. These are
     # config so repricing is a config-var change — and every Order

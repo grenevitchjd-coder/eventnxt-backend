@@ -22,6 +22,7 @@ from fastapi.testclient import TestClient
 
 import app.services.deps as deps_module
 import app.services.event_access as event_access_module
+import app.services.permissions as permissions_module
 from app.main import app
 
 EV = "11111111-1111-1111-1111-111111111111"
@@ -134,6 +135,28 @@ def run():
         check(c, "post", f"/events/{EV}/guests", False, f"{label}: guests write")
         done(c)
     print("5. owner + pre-bridge fallback open: PASS")
+
+    # 5b. A permissions object that's PRESENT but EMPTY ({}) is a real
+    # "zero grants" answer from Events360, not the missing-field rollout
+    # case — it must deny, never fall back to all-access.
+    c = client_with({})
+    check(c, "get", f"/events/{EV}/promo-stats", True, "empty perms dict: money read denied")
+    check(c, "post", f"/events/{EV}/guests", True, "empty perms dict: guests write denied")
+    done(c)
+    print("5b. present-but-empty permissions denies (not the pre-bridge case): PASS")
+
+    # 5c. With PERMISSIONS_BRIDGE_REQUIRED on, a MISSING field (None) also
+    # denies instead of falling back — the rollout escape hatch is closed
+    # once Events360's bridge is confirmed live.
+    permissions_module.settings.permissions_bridge_required = True
+    try:
+        c = client_with(None)
+        check(c, "get", f"/events/{EV}/promo-stats", True, "bridge required: missing perms denied")
+        check(c, "post", f"/events/{EV}/guests", True, "bridge required: missing perms denied")
+        done(c)
+    finally:
+        permissions_module.settings.permissions_bridge_required = False
+    print("5c. PERMISSIONS_BRIDGE_REQUIRED closes the missing-field fallback: PASS")
 
     # 6. Public routes untouched by the sweep: no auth, no 401/403 from gates
     c = TestClient(app)
