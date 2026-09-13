@@ -405,7 +405,7 @@ def respond_to_rsvp(token: str, payload: RSVPRespondRequest, db: Session = Depen
                 tickets = comp_tickets.issue_comp_tickets(db, guest)
                 db.flush()
                 comp_tickets.send_comp_ticket_email(db, guest, tickets)
-        elif guest.seating_category_id:
+        elif guest.seating_category_id and guest.seating_category_preset:
             # An organizer-preset area/section (e.g. picked from the
             # Invites grid's Seating dropdown while the guest was still
             # PENDING) is a deliberate choice too — it should stick
@@ -419,6 +419,17 @@ def respond_to_rsvp(token: str, payload: RSVPRespondRequest, db: Session = Depen
             # room may have changed since it was set — with the same
             # soft needs-seating landing as an unresolvable priority
             # walk, never a lost yes.
+            #
+            # seating_category_preset (0055) is what tells this apart
+            # from create_guest's PENDING-creation placeholder — a
+            # display-only "which category would they land in first"
+            # guess with no capacity check and no section, which must
+            # NOT be treated as a deliberate preset. Before 0055 this
+            # branch fired on that placeholder too: a pending guest's
+            # RSVP-yes stuck at pool level with no section ever actually
+            # claimed, so the section's capacity was never touched and a
+            # later guest could get seated into an apparently-full
+            # section that was never really full.
             try:
                 seating.check_capacity(
                     db, str(guest.event_id), str(guest.seating_category_id),
@@ -450,6 +461,11 @@ def respond_to_rsvp(token: str, payload: RSVPRespondRequest, db: Session = Depen
         else:
             guest.seating_category_id = new_category_id
             guest.section_label = new_section_label
+            # A genuine, capacity-checked resolution — mark it a preset
+            # (0055) so a repeat /respond call (a resent link, a stray
+            # double-click) treats this placement as settled rather than
+            # re-walking priorities and possibly relocating them.
+            guest.seating_category_preset = new_category_id is not None
             guest.allocation_status = GuestAllocationStatus.CONFIRMED
             guest.rsvp_confirmed = "yes"
             guest.needs_seating = False

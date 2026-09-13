@@ -124,7 +124,15 @@ def main():
     check("rsvp guest recorded in Section A", gl[g3["id"]]["section_label"] == "A", gl[g3["id"]])
     codes = client.get(f"/public/rsvp/{g3['rsvp_token']}").json().get("ticket_codes") or []
     scan = client.post(f"/events/{EV}/check-in/{codes[0]}", headers=H).json() if codes else {}
-    check("door scan shows Section A", scan.get("seat_label") == "Section A", scan)
+    check(
+        "door scan shows Section A",
+        # format_unit_label's canonical order is row-then-section (see
+        # the door-sales suite's identical pin) — the pool here has
+        # row_label "Row 2", so "Row 2 · Section A" is correct, not the
+        # bare "Section A" this used to expect.
+        scan.get("seat_label") == "Row 2 · Section A",
+        scan,
+    )
 
     # ---- 4. explicit placement into full section refused with section message ----
     r = add_guest(gtx["id"], "Eve Extra", 1, category_id=p1["id"], section="A")

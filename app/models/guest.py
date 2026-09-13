@@ -64,6 +64,13 @@ class Guest(Base):
     is_referrer_only = Column(Boolean, nullable=False, default=False, server_default="false")
     # Nullable: a guest type may have no seating category assigned yet.
     seating_category_id = Column(UUID(as_uuid=True), ForeignKey("seating_categories.id"), nullable=True)
+    # TRUE only when a human explicitly chose seating_category_id
+    # (create_guest's explicit-override branch, or update_guest, which
+    # always takes an explicit value). FALSE for the pending-creation
+    # placeholder (0055) — a display-only "which category would they
+    # land in first" guess with no capacity check, which must NOT be
+    # treated as a sticky preset when the guest later RSVPs yes.
+    seating_category_preset = Column(Boolean, nullable=False, default=False, server_default="false")
     # Which section within their pool this comp guest was placed in
     # (resolver or organizer). A label, not an FK — see the priority
     # model. NULL = floats at pool level (every pre-0031 comp).
