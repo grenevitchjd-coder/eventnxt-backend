@@ -313,7 +313,9 @@ def restamp_guest_tickets(db: Session, guest) -> None:
                 t.ticket_type_id = tt.id
 
 
-def assign_guest_seats(db: Session, *, guest, seat_ids: list[uuid.UUID]) -> list[Seat]:
+def assign_guest_seats(
+    db: Session, *, guest, seat_ids: list[uuid.UUID], require_seating_category: bool = True,
+) -> list[Seat]:
     """
     Wholesale-replace a guest's seat assignment (same full-replace
     contract as sections). Locks every affected seat FOR UPDATE in id
@@ -325,8 +327,19 @@ def assign_guest_seats(db: Session, *, guest, seat_ids: list[uuid.UUID]) -> list
     their reservation — freeing a press hold is a deliberate act in the
     seat view, never a side effect of reshuffling one guest.
     Finally re-stamps the guest's comp tickets. Caller commits.
+
+    require_seating_category=False (0055 fix) is for a distribute-mode
+    HOLDER's own "hold now" reservation (hold_seats_for_allotment): a
+    holder is a placeholder entity with no personal seating area of
+    their own by design — their held seats are resolved per-day via
+    their guest TYPE's priorities, not a single seating_category_id on
+    the holder — so the ordinary "set an area first" guard doesn't
+    apply to them. Every other caller (the organizer's Seats picker,
+    ordinary comp auto-pick, RSVP placement) keeps the guard: those
+    guests always have a real seating_category_id by the time seats are
+    assigned, and the guard catches a genuine "no area yet" mistake.
     """
-    if guest.seating_category_id is None:
+    if guest.seating_category_id is None and require_seating_category:
         raise HTTPException(
             status_code=400,
             detail=f"{guest.name} isn't assigned to a seating area yet — set their area first, then pick seats.",

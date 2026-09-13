@@ -971,7 +971,9 @@ def hold_seats_for_allotment(db: Session, holder) -> list:
             continue
         new_ids.extend(seats_service.pick_available_seats(db, category_id, section_label, row.quantity))
     if new_ids:
-        seats_service.assign_guest_seats(db, guest=holder, seat_ids=existing_ids + new_ids)
+        seats_service.assign_guest_seats(
+            db, guest=holder, seat_ids=existing_ids + new_ids, require_seating_category=False,
+        )
     return new_ids
 
 
